@@ -26,7 +26,7 @@ codex plugin add codex-workflows@codex-workflows
 Pinned install:
 
 ```bash
-codex plugin marketplace add robzilla1738/Codex-Workflows --ref v0.1.0
+codex plugin marketplace add robzilla1738/Codex-Workflows --ref v0.2.0
 codex plugin add codex-workflows@codex-workflows
 ```
 
@@ -82,7 +82,7 @@ reload plugin skills and MCP tools.
 7. Tag and push:
 
    ```bash
-   git tag v0.1.0
+   git tag v0.2.0
    git push origin main --tags
    ```
 

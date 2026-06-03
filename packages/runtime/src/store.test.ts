@@ -114,4 +114,83 @@ describe("RunStore", () => {
     const currentDefault = new RunStore(cwd);
     expect((await currentDefault.readSummary(runId)).name).toBe("legacy");
   });
+
+  it("marks stale running agents failed when the detached runner is gone", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "cwf-store-"));
+    tmpRoots.push(cwd);
+    const store = new RunStore(cwd, { staleHeartbeatMs: 1 });
+    const runId = "orphan-run";
+    const old = new Date(Date.now() - 60_000).toISOString();
+    await store.initRun(
+      {
+        id: runId,
+        name: "orphan",
+        version: "1",
+        description: "orphan",
+        workflowPath: "workflow.js",
+        cwd,
+        status: "running",
+        createdAt: old,
+        updatedAt: old,
+        startedAt: old,
+        runnerPid: 99_999_999,
+        heartbeatAt: old,
+        lastActivityAt: old,
+        phases: [{ id: "find", title: "Find", status: "running", totalAgents: 2, completedAgents: 1, failedAgents: 0, startedAt: old }],
+        agents: [
+          {
+            id: "find:done",
+            phaseId: "find",
+            title: "find:done",
+            prompt: "done",
+            sandbox: "read-only",
+            status: "completed",
+            tokens: 1,
+            tools: 1,
+            elapsedMs: 1,
+            attempts: 1,
+            completedAt: old
+          },
+          {
+            id: "find:stuck",
+            phaseId: "find",
+            title: "find:stuck",
+            prompt: "stuck",
+            sandbox: "read-only",
+            status: "running",
+            tokens: 0,
+            tools: 0,
+            elapsedMs: 0,
+            attempts: 1,
+            startedAt: old
+          }
+        ],
+        totals: {
+          totalAgents: 2,
+          completedAgents: 1,
+          failedAgents: 0,
+          runningAgents: 1,
+          tokens: 1,
+          tools: 1,
+          elapsedMs: 0
+        }
+      },
+      {
+        name: "orphan",
+        version: "1",
+        description: "orphan",
+        maxConcurrency: 1,
+        maxAgents: 2,
+        phases: [{ id: "find", title: "Find", agents: [] }]
+      },
+      {},
+      "workflow({name:'orphan'})"
+    );
+
+    const summary = await store.readSummary(runId);
+    expect(summary.status).toBe("failed");
+    expect(summary.agents.find((agent) => agent.id === "find:done")?.status).toBe("completed");
+    expect(summary.agents.find((agent) => agent.id === "find:stuck")?.status).toBe("failed");
+    expect(summary.error).toContain("runner process");
+  });
 });

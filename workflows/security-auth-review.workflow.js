@@ -1,10 +1,31 @@
+const verifyContext = {
+  phaseIds: ["find"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "by-index",
+  maxFindings: 1
+};
+
+const probeContext = {
+  phaseIds: ["verify"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "all",
+  maxFindings: 20
+};
+
+const synthesizeContext = {
+  phaseIds: ["verify", "probe"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "all",
+  maxFindings: 24
+};
+
 export default workflow({
   name: "security-auth-review",
   version: "1",
   description:
     "Security-focused workflow for auth, permission, injection, secret handling, and unsafe tool-path review.",
-  maxConcurrency: 12,
-  maxAgents: 48,
+  maxConcurrency: 64,
+  maxAgents: 2000,
   phases: [
     {
       id: "find",
@@ -50,6 +71,7 @@ export default workflow({
         title: `security-claim-${String(index + 1).padStart(2, "0")}`,
         prompt:
           "Adversarially verify one candidate security finding. Prefer false-positive unless evidence proves impact. Return strict JSON findings only.",
+        contextFrom: verifyContext,
         expectedTokens: 70000 + index * 1500,
         expectedTools: 40 + (index % 11),
         durationMs: 520 + index * 18
@@ -63,13 +85,15 @@ export default workflow({
           id: "exploitability",
           title: "exploitability",
           prompt:
-            "For plausible security issues, assess exploitability and minimal safe repro steps without destructive actions. Return strict JSON findings only."
+            "For plausible security issues, assess exploitability and minimal safe repro steps without destructive actions. Return strict JSON findings only.",
+          contextFrom: probeContext
         },
         {
           id: "hardening-tests",
           title: "hardening-tests",
           prompt:
-            "Propose exact hardening tests and acceptance criteria for confirmed security findings. Return strict JSON findings only."
+            "Propose exact hardening tests and acceptance criteria for confirmed security findings. Return strict JSON findings only.",
+          contextFrom: probeContext
         }
       ]
     },
@@ -81,7 +105,8 @@ export default workflow({
           id: "security-report",
           title: "security-report",
           prompt:
-            "Synthesize verified security findings into a release-ready security report with severity, evidence, and fixes. Return strict JSON findings only."
+            "Synthesize verified security findings into a release-ready security report with severity, evidence, and fixes. Return strict JSON findings only.",
+          contextFrom: synthesizeContext
         }
       ]
     }

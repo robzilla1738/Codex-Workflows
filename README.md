@@ -37,17 +37,24 @@ from Codex or from the CLI.
 
 ## What it includes
 
-- `bug-sweep`: broad codebase review, adversarial verification, repro planning,
-  and synthesis.
+- `bug-sweep`: bounded codebase review, adversarial verification, repro
+  planning, and synthesis.
+- `bug-sweep-deep`: larger opt-in fanout for deeper bug hunts.
 - `release-diff-review`: release-blocker review against a branch or diff.
 - `security-auth-review`: auth, permission, injection, secret, sandbox, and MCP
   boundary review.
 - Live dashboard with phases, agent rows, token/tool/time metrics, detail view,
   pause/resume/stop/restart/save controls, and final report path.
+- Workflow definitions can explicitly request up to 64 concurrent workers and
+  2000 total agents.
 - Durable run state under `${CODEX_HOME:-~/.codex}/codex-workflows/projects/<project-hash>/runs/<run-id>/`
   by default, so read-only bug hunts do not dirty the target repo.
 - Project-local storage remains available with `storageScope: "project"` or
   `--storage-scope project`.
+- Downstream verify, probe, and synthesize agents receive prior phase findings
+  as explicit context instead of guessing at earlier results.
+- Detached worker heartbeats let status reads and dashboards identify orphaned
+  runs when a background workflow process dies.
 - Isolated workflow script loading through QuickJS. Workflow scripts define
   phases and agent prompts; they do not get direct filesystem, shell, network,
   process, or Node built-in access.
@@ -85,6 +92,7 @@ pnpm test
 pnpm cwf validate workflows/bug-sweep.workflow.js
 pnpm cwf run workflows/bug-sweep.workflow.js --watch --adapter simulate
 pnpm cwf run workflows/bug-sweep.workflow.js --watch --adapter auto --model gpt-5.4-mini
+pnpm cwf run workflows/bug-sweep-deep.workflow.js --watch --adapter auto --model gpt-5.4-mini
 ```
 
 Useful local commands:

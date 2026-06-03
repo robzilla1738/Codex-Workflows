@@ -35,6 +35,7 @@ repeatable multi-agent process.
    instructions in `promptSuffix`.
 8. Use the system-default/wide terminal defaults unless the user asks otherwise:
    `terminalApp: "default"`, `terminalColumns: 190`, `terminalRows: 42`.
+   The plugin accepts explicit terminal sizes up to 500 columns by 120 rows.
 9. Store normal bug-hunt run artifacts in Codex home by default. Use
    `storageScope: "project"` only when the user asks for project-local run
    logs or when saving a reusable workflow.
@@ -43,7 +44,10 @@ repeatable multi-agent process.
    `pnpm cwf` CLI only when working inside the `codex-workflows` source repo.
 11. Keep the main Codex thread concise. Poll status and summarize progress
    instead of pasting raw worker logs.
-12. For bug finding, default to `workflows/bug-sweep.workflow.js`.
+12. For bug finding, default to the bounded
+    `workflows/bug-sweep.workflow.js`.
+    Use `workflows/bug-sweep-deep.workflow.js` only when the user explicitly
+    asks for a larger or deeper fanout.
 13. For release review, default to `workflows/release-diff-review.workflow.js`.
 14. For security review, default to `workflows/security-auth-review.workflow.js`.
 15. Before write-capable workflows, state the sandbox mode and ask for approval.

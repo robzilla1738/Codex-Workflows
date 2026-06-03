@@ -1,10 +1,31 @@
+const verifyContext = {
+  phaseIds: ["find"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "by-index",
+  maxFindings: 1
+};
+
+const probeContext = {
+  phaseIds: ["verify"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "all",
+  maxFindings: 32
+};
+
+const synthesizeContext = {
+  phaseIds: ["verify", "probe"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "all",
+  maxFindings: 48
+};
+
 export default workflow({
   name: "release-diff-review-v2",
   version: "1",
   description:
     "Exhaustive adversarial review of v1.1.2...main for Harness v1.2.0 (robust JSON-text contract)",
-  maxConcurrency: 16,
-  maxAgents: 108,
+  maxConcurrency: 64,
+  maxAgents: 2000,
   phases: [
     {
       id: "find",
@@ -161,6 +182,7 @@ export default workflow({
         prompt:
           "Adversarially verify one candidate finding against the codebase. Return confirmed, false-positive, or needs-human-review as strict JSON text.",
         model: "Codex",
+        contextFrom: verifyContext,
         expectedTokens: 62000 + index * 1200,
         expectedTools: 35 + (index % 19),
         durationMs: 450 + index * 12
@@ -176,6 +198,7 @@ export default workflow({
           prompt:
             "Design a minimal live smoke plan for the riskiest confirmed release findings.",
           model: "Codex",
+          contextFrom: probeContext,
           expectedTokens: 84000,
           expectedTools: 56,
           durationMs: 700
@@ -186,6 +209,7 @@ export default workflow({
           prompt:
             "Identify missing regression tests for confirmed findings and propose exact test names.",
           model: "Codex",
+          contextFrom: probeContext,
           expectedTokens: 76000,
           expectedTools: 49,
           durationMs: 660
@@ -202,6 +226,7 @@ export default workflow({
           prompt:
             "Synthesize verified findings into a release-readiness report with blockers, evidence, and recommended fixes.",
           model: "Codex",
+          contextFrom: synthesizeContext,
           expectedTokens: 97000,
           expectedTools: 42,
           durationMs: 820

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -144,6 +144,172 @@ describe("runWorkflow", () => {
     expect(calls).toBe(2);
     expect(summary.status).toBe("completed");
     expect(summary.agents[0]?.findings?.[0]?.verdict).toBe("confirmed");
+  });
+
+  it("accepts an empty findings array and writes a clean final report", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "cwf-runner-"));
+    tmpRoots.push(cwd);
+    const workflowPath = path.join(cwd, "empty.workflow.js");
+    await writeFile(
+      workflowPath,
+      `export default workflow({
+        name:"empty",
+        description:"Empty",
+        phases:[{id:"find",title:"Find",agents:[{id:"a",title:"a",prompt:"A"}]}]
+      });`
+    );
+    const adapter: WorkerAdapter = {
+      name: "test",
+      async runWorker() {
+        return {
+          output: JSON.stringify({ findings: [] }),
+          tokens: 0,
+          tools: 0,
+          elapsedMs: 1
+        };
+      }
+    };
+
+    const summary = await runWorkflow({ cwd, workflowPath, adapter });
+    expect(summary.status).toBe("completed");
+    expect(summary.agents[0]?.findings).toEqual([]);
+    expect(summary.finalReportPath).toBeTruthy();
+    expect(await readFile(summary.finalReportPath ?? "", "utf8")).toContain(
+      "No confirmed findings survived validation."
+    );
+  });
+
+  it("passes prior phase findings through contextFrom modes", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "cwf-runner-"));
+    tmpRoots.push(cwd);
+    const workflowPath = path.join(cwd, "context.workflow.js");
+    await writeFile(
+      workflowPath,
+      `const filtered = {phaseIds:["find"],verdicts:["confirmed","needs-human-review"]};
+      export default workflow({
+        name:"context",
+        description:"Context",
+        maxConcurrency:2,
+        phases:[
+          {id:"find",title:"Find",agents:[{id:"source",title:"source",prompt:"Find"}]},
+          {id:"all",title:"All",agents:[{id:"all",title:"all",prompt:"All",contextFrom:{phaseIds:filtered.phaseIds,verdicts:filtered.verdicts,mode:"all",maxFindings:2}}]},
+          {id:"by",title:"By",agents:[
+            {id:"first",title:"first",prompt:"By 1",contextFrom:{phaseIds:filtered.phaseIds,verdicts:filtered.verdicts,mode:"by-index",maxFindings:1}},
+            {id:"second",title:"second",prompt:"By 2",contextFrom:{phaseIds:filtered.phaseIds,verdicts:filtered.verdicts,mode:"by-index",maxFindings:1}}
+          ]},
+          {id:"round",title:"Round",agents:[
+            {id:"first",title:"first",prompt:"Round 1",contextFrom:{phaseIds:filtered.phaseIds,verdicts:filtered.verdicts,mode:"round-robin"}},
+            {id:"second",title:"second",prompt:"Round 2",contextFrom:{phaseIds:filtered.phaseIds,verdicts:filtered.verdicts,mode:"round-robin"}}
+          ]}
+        ]
+      });`
+    );
+    const prompts = new Map<string, string>();
+    const adapter: WorkerAdapter = {
+      name: "test",
+      async runWorker(spec) {
+        prompts.set(spec.id, spec.prompt);
+        if (spec.phaseId === "find") {
+          return {
+            output: JSON.stringify({
+              findings: [
+                {
+                  verdict: "confirmed",
+                  severity: "high",
+                  summary: "issue A",
+                  evidence: ["a.ts:1"],
+                  confidence: 0.9
+                },
+                {
+                  verdict: "false-positive",
+                  severity: "low",
+                  summary: "issue B",
+                  evidence: ["b.ts:1"],
+                  confidence: 0.9
+                },
+                {
+                  verdict: "needs-human-review",
+                  severity: "medium",
+                  summary: "issue C",
+                  evidence: ["c.ts:1"],
+                  confidence: 0.7
+                },
+                {
+                  verdict: "confirmed",
+                  severity: "low",
+                  summary: "issue D",
+                  evidence: ["d.ts:1"],
+                  confidence: 0.8
+                }
+              ]
+            }),
+            tokens: 1,
+            tools: 1,
+            elapsedMs: 1
+          };
+        }
+        return {
+          output: JSON.stringify({ findings: [] }),
+          tokens: 0,
+          tools: 0,
+          elapsedMs: 1
+        };
+      }
+    };
+
+    await runWorkflow({ cwd, workflowPath, adapter });
+
+    expect(prompts.get("all:all")).toContain("issue A");
+    expect(prompts.get("all:all")).toContain("issue C");
+    expect(prompts.get("all:all")).not.toContain("issue B");
+    expect(prompts.get("all:all")).not.toContain("issue D");
+    expect(prompts.get("by:first")).toContain("issue A");
+    expect(prompts.get("by:first")).not.toContain("issue C");
+    expect(prompts.get("by:second")).toContain("issue C");
+    expect(prompts.get("by:second")).not.toContain("issue A");
+    expect(prompts.get("round:first")).toContain("issue A");
+    expect(prompts.get("round:first")).toContain("issue D");
+    expect(prompts.get("round:first")).not.toContain("issue C");
+    expect(prompts.get("round:second")).toContain("issue C");
+    expect(prompts.get("round:second")).not.toContain("issue A");
+  });
+
+  it("persists the full worker prompt when an agent starts", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "cwf-runner-"));
+    tmpRoots.push(cwd);
+    const workflowPath = path.join(cwd, "prompt.workflow.js");
+    await writeFile(
+      workflowPath,
+      `export default workflow({
+        name:"prompt",
+        description:"Prompt",
+        phases:[{id:"find",title:"Find",agents:[{id:"a",title:"a",prompt:"A"}]}]
+      });`
+    );
+    const adapter: WorkerAdapter = {
+      name: "slow",
+      async runWorker() {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return {
+          output: JSON.stringify({ findings: [] }),
+          tokens: 0,
+          tools: 0,
+          elapsedMs: 100
+        };
+      }
+    };
+    const done = runWorkflow({ cwd, workflowPath, adapter, runId: "run-prompt" });
+    const promptPath = path.join(
+      new RunStore(cwd).agentDir("run-prompt", "find:a"),
+      "prompt.md"
+    );
+    for (let attempt = 0; attempt < 20 && !existsSync(promptPath); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(await readFile(promptPath, "utf8")).toContain(
+      "You are running as subagent find:a"
+    );
+    await done;
   });
 
   it("resumes with completed agents cached and reruns only restarted agents", async () => {

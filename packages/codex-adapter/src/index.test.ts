@@ -76,6 +76,44 @@ describe("SimulatedCodexAdapter", () => {
     ).rejects.toThrow("The model is unsupported");
   });
 
+  it("parses codex exec JSON usage and tool events", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cwf-adapter-"));
+    tmpRoots.push(root);
+    const fakeCodex = path.join(root, "codex");
+    await writeFile(
+      fakeCodex,
+      [
+        "#!/bin/sh",
+        "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\"}}'",
+        "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\\\"findings\\\\\":[]}\"}}'",
+        "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"reasoning_output_tokens\":6}}'",
+        "exit 0",
+        ""
+      ].join("\n")
+    );
+    await chmod(fakeCodex, 0o755);
+    process.env.CODEX_WORKFLOWS_CODEX_BIN = fakeCodex;
+
+    const progress: unknown[] = [];
+    const result = await new CodexExecAdapter().runWorker(
+      {
+        id: "agent-1",
+        phaseId: "find",
+        title: "find:adapter",
+        prompt: "Inspect adapter",
+        cwd: root,
+        sandbox: "read-only"
+      },
+      (event) => progress.push(event)
+    );
+
+    expect(result.output).toBe('{"findings":[]}');
+    expect(result.tokens).toBe(20);
+    expect(result.tools).toBe(1);
+    expect(progress).toContainEqual(expect.objectContaining({ tokens: 20 }));
+    expect(progress).toContainEqual(expect.objectContaining({ tools: 1 }));
+  });
+
   it("falls back from unavailable SDK launch to exec in auto mode", async () => {
     const sdk = {
       name: "sdk",

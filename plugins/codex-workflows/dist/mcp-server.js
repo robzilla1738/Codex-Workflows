@@ -32739,12 +32739,20 @@ var SandboxModeSchema = external_exports.enum([
 var ReasoningEffortSchema = external_exports.enum(["minimal", "low", "medium", "high", "xhigh"]);
 var WorkerAdapterNameSchema = external_exports.enum(["auto", "simulate", "exec", "sdk"]);
 var StorageScopeSchema = external_exports.enum(["codex-home", "project"]);
+var MAX_WORKFLOW_CONCURRENCY = 64;
+var MAX_WORKFLOW_AGENTS = 2e3;
 var FindingVerdictSchema = external_exports.enum([
   "confirmed",
   "false-positive",
   "needs-human-review"
 ]);
 var FindingSeveritySchema = external_exports.enum(["blocker", "high", "medium", "low"]);
+var ContextFromSchema = external_exports.object({
+  phaseIds: external_exports.array(external_exports.string().min(1)).min(1),
+  verdicts: external_exports.array(FindingVerdictSchema).optional(),
+  mode: external_exports.enum(["all", "by-index", "round-robin"]).default("all"),
+  maxFindings: external_exports.number().int().positive().optional()
+});
 var AgentFindingSchema = external_exports.object({
   verdict: FindingVerdictSchema,
   severity: FindingSeveritySchema,
@@ -32764,6 +32772,7 @@ var AgentDefinitionSchema = external_exports.object({
   model: external_exports.string().min(1).optional(),
   reasoningEffort: ReasoningEffortSchema.optional(),
   sandbox: SandboxModeSchema.default("read-only"),
+  contextFrom: ContextFromSchema.optional(),
   expectedTokens: external_exports.number().int().nonnegative().optional(),
   expectedTools: external_exports.number().int().nonnegative().optional(),
   durationMs: external_exports.number().int().nonnegative().optional()
@@ -32777,8 +32786,8 @@ var WorkflowDefinitionSchema = external_exports.object({
   name: external_exports.string().min(1),
   version: external_exports.string().min(1).default("1"),
   description: external_exports.string().min(1),
-  maxConcurrency: external_exports.number().int().positive().max(16).default(16),
-  maxAgents: external_exports.number().int().positive().max(1e3).default(1e3),
+  maxConcurrency: external_exports.number().int().positive().max(MAX_WORKFLOW_CONCURRENCY).default(16),
+  maxAgents: external_exports.number().int().positive().max(MAX_WORKFLOW_AGENTS).default(1e3),
   phases: external_exports.array(PhaseDefinitionSchema).min(1)
 });
 var PhaseSummarySchema = external_exports.object({
@@ -32810,7 +32819,9 @@ var AgentSummarySchema = external_exports.object({
   error: external_exports.string().optional(),
   attempts: external_exports.number().int().nonnegative().default(0),
   startedAt: external_exports.string().optional(),
-  completedAt: external_exports.string().optional()
+  completedAt: external_exports.string().optional(),
+  lastActivityAt: external_exports.string().optional(),
+  lastMessage: external_exports.string().optional()
 });
 var RunTotalsSchema = external_exports.object({
   totalAgents: external_exports.number().int().nonnegative(),
@@ -32837,6 +32848,9 @@ var RunSummarySchema = external_exports.object({
   updatedAt: external_exports.string(),
   startedAt: external_exports.string().optional(),
   completedAt: external_exports.string().optional(),
+  runnerPid: external_exports.number().int().positive().optional(),
+  heartbeatAt: external_exports.string().optional(),
+  lastActivityAt: external_exports.string().optional(),
   selectedPhaseId: external_exports.string().optional(),
   phases: external_exports.array(PhaseSummarySchema),
   agents: external_exports.array(AgentSummarySchema),
@@ -33201,6 +33215,10 @@ import { homedir } from "node:os";
 import path from "node:path";
 var elapsed = (startedAt) => startedAt ? Math.max(0, Date.now() - new Date(startedAt).getTime()) : 0;
 var refreshSummaryCounts = (summary) => {
+  summary.agents = summary.agents.map((agent) => agent.status === "running" && agent.startedAt ? {
+    ...agent,
+    elapsedMs: elapsed(agent.startedAt)
+  } : agent);
   summary.phases = summary.phases.map((phase) => {
     const agents = summary.agents.filter((agent) => agent.phaseId === phase.id);
     return {
@@ -33224,16 +33242,32 @@ var codexHome = () => process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
 var projectHash = (cwd) => createHash2("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16);
 var defaultStoreRoot = (cwd, storageScope = "codex-home") => storageScope === "project" ? projectStoreRoot(cwd) : path.join(codexHome(), "codex-workflows", "projects", projectHash(cwd));
 var dirExists = (candidate) => existsSync(candidate);
+var defaultStaleHeartbeatMs = () => {
+  const raw = process.env.CODEX_WORKFLOWS_STALE_HEARTBEAT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1e3;
+};
+var processIsAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+var cloneSummary = (summary) => RunSummarySchema.parse(JSON.parse(JSON.stringify(summary)));
 var RunStore = class {
   cwd;
   root;
   storageScope;
   projectRoot;
+  staleHeartbeatMs;
   constructor(cwd, options = {}) {
     this.cwd = cwd;
     this.storageScope = options.storageScope ?? "codex-home";
     this.projectRoot = projectStoreRoot(cwd);
     this.root = options.storeRoot ?? defaultStoreRoot(cwd, this.storageScope);
+    this.staleHeartbeatMs = options.staleHeartbeatMs ?? defaultStaleHeartbeatMs();
   }
   runDir(runId) {
     const primary = path.join(this.root, "runs", runId);
@@ -33313,13 +33347,55 @@ var RunStore = class {
     let lastError;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        return RunSummarySchema.parse(JSON.parse(await readFile2(this.statusPath(runId), "utf8")));
+        const parsed = RunSummarySchema.parse(JSON.parse(await readFile2(this.statusPath(runId), "utf8")));
+        return await this.reconcileSummary(parsed);
       } catch (error51) {
         lastError = error51;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
     }
     throw lastError;
+  }
+  async reconcileSummary(summary) {
+    const next = cloneSummary(summary);
+    refreshSummaryCounts(next);
+    if (next.status !== "running" && next.status !== "paused") {
+      return next;
+    }
+    if (!next.runnerPid || processIsAlive(next.runnerPid)) {
+      return next;
+    }
+    const heartbeatAt = next.heartbeatAt ?? next.lastActivityAt;
+    if (!heartbeatAt) {
+      return next;
+    }
+    const staleForMs = Date.now() - new Date(heartbeatAt).getTime();
+    if (staleForMs < this.staleHeartbeatMs) {
+      return next;
+    }
+    const at = nowIso();
+    const error51 = `Workflow runner process ${next.runnerPid} is not running and heartbeat is stale since ${heartbeatAt}.`;
+    next.status = "failed";
+    next.error = error51;
+    next.completedAt = at;
+    next.lastActivityAt = at;
+    next.agents = next.agents.map((agent) => agent.status === "running" ? {
+      ...agent,
+      status: "failed",
+      error: error51,
+      completedAt: at,
+      lastActivityAt: at,
+      lastMessage: "runner orphaned"
+    } : agent);
+    next.phases = next.phases.map((phase) => phase.status === "running" || phase.status === "paused" ? {
+      ...phase,
+      status: "failed",
+      completedAt: at
+    } : phase);
+    refreshSummaryCounts(next);
+    await this.writeSummary(next);
+    await this.appendEvent({ type: "run_failed", runId: next.id, at, error: error51 }).catch(() => void 0);
+    return next;
   }
   async appendEvent(event) {
     const parsed = WorkflowEventSchema.parse(event);
@@ -33377,6 +33453,12 @@ var RunStore = class {
     await writeFile(path.join(dir, "result.json"), `${JSON.stringify(agent, null, 2)}
 `);
   }
+  async writeAgentPrompt(runId, agentId, prompt) {
+    const dir = this.agentDir(runId, agentId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "prompt.md"), `${prompt}
+`);
+  }
   async writeFinalReport(runId, markdown) {
     const finalReportPath = path.join(this.runDir(runId), "final.md");
     await writeFile(finalReportPath, markdown);
@@ -33399,6 +33481,12 @@ var RunStore = class {
       rawResult: void 0,
       findings: void 0,
       completedAt: void 0,
+      startedAt: void 0,
+      lastActivityAt: void 0,
+      lastMessage: void 0,
+      tokens: 0,
+      tools: 0,
+      elapsedMs: 0,
       attempts: 0
     } : item);
     summary.phases = summary.phases.map((phase) => phase.id === agent.phaseId ? {
@@ -33532,6 +33620,7 @@ var writeDashboardCommand = async (root, runId, columns, rows, store) => {
     [
       "#!/bin/zsh",
       `printf '\\033[8;${rows};${columns}t'`,
+      "printf '\\033[2J\\033[H'",
       `cd ${quoteShell(root)} || exit 1`,
       `exec ${quoteShell(process.execPath)} ${quoteShell(cliPathFor(root))} watch ${quoteShell(
         runId
@@ -33672,7 +33761,7 @@ var storeFor = (root, storageScope = "codex-home", storeRoot) => new RunStore(ro
 var server = new McpServer(
   {
     name: "codex-workflows",
-    version: "0.1.0"
+    version: "0.2.0"
   },
   {
     instructions: "Run and inspect Codex workflow-as-code jobs. Prefer workflow_run for release review fanout, workflow_status for concise progress, and workflow_events only when raw event history is needed."
@@ -33696,8 +33785,8 @@ server.registerTool(
       storeRoot: external_exports.string().optional(),
       openTui: external_exports.boolean().default(true),
       terminalApp: external_exports.enum(["default", "auto", "harness", "terminal"]).default("default"),
-      terminalColumns: external_exports.number().int().min(100).max(300).default(190),
-      terminalRows: external_exports.number().int().min(24).max(80).default(42),
+      terminalColumns: external_exports.number().int().min(100).max(500).default(190),
+      terminalRows: external_exports.number().int().min(24).max(120).default(42),
       cwd: cwdSchema
     }
   },
@@ -33831,7 +33920,8 @@ server.registerTool(
           title: agent.title,
           model: agent.model,
           reasoningEffort: agent.reasoningEffort,
-          sandbox: agent.sandbox
+          sandbox: agent.sandbox,
+          contextFrom: agent.contextFrom
         }))
       })),
       hash: loaded.hash
@@ -33976,6 +34066,7 @@ server.registerTool(
     const root = path2.resolve(cwd ?? process.cwd());
     const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(root, storageScope);
     const store = storeFor(root, storageScope, resolvedStoreRoot);
+    await store.clearControl(runId);
     const summary = await store.markAgentForRestart(runId, agentId);
     const manifest = await store.readManifest(runId);
     const launch = manifest.launch ?? {};
@@ -33992,11 +34083,6 @@ server.registerTool(
       storageScope,
       storeRoot: resolvedStoreRoot,
       resume: true
-    });
-    await store.writeControl(runId, {
-      type: "restart-agent",
-      at: nowIso(),
-      agentId
     });
     return text({ runId, agentId, command: "restart-agent", workerPid });
   }

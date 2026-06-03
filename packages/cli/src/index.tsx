@@ -85,7 +85,7 @@ const storeFor = (cwd: string, storageScope: StorageScope = "codex-home", storeR
 program
   .name("cwf")
   .description("Codex workflow-as-code runtime")
-  .version("0.1.0");
+  .version("0.2.0");
 
 program
   .command("__run-worker", { hidden: true })
@@ -183,6 +183,7 @@ program
     const runs = await store.listRuns();
     console.log("Built-in workflows:");
     console.log("  workflows/bug-sweep.workflow.js");
+    console.log("  workflows/bug-sweep-deep.workflow.js");
     console.log("  workflows/release-diff-review.workflow.js");
     console.log("  workflows/security-auth-review.workflow.js");
     console.log("");
@@ -271,6 +272,7 @@ program
     const cwd = path.resolve(options.cwd);
     const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd, options.storageScope);
     const store = storeFor(cwd, options.storageScope, storeRoot);
+    await store.clearControl(runId);
     const summary = await store.markAgentForRestart(runId, agentId);
     const manifest = await store.readManifest(runId);
     await runWorkflow({
@@ -299,7 +301,6 @@ program
       storeRoot,
       resume: true
     });
-    await store.writeControl(runId, { type: "restart-agent", at: nowIso(), agentId });
     console.log(`restarted ${agentId} in ${runId}`);
   });
 

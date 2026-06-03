@@ -51,6 +51,14 @@ const buildTotals = (summary: RunSummary) => ({
 });
 
 const refreshPhaseCounts = (summary: RunSummary) => {
+  summary.agents = summary.agents.map((agent) =>
+    agent.status === "running" && agent.startedAt
+      ? {
+          ...agent,
+          elapsedMs: elapsed(agent.startedAt)
+        }
+      : agent
+  );
   summary.phases = summary.phases.map((phase) => {
     const agents = summary.agents.filter((agent) => agent.phaseId === phase.id);
     return {
@@ -149,7 +157,8 @@ const buildWorkerPrompt = (
   phaseId: string,
   agent: AgentDefinition,
   args: unknown,
-  options: Pick<RunWorkflowOptions, "promptSuffix">
+  options: Pick<RunWorkflowOptions, "promptSuffix">,
+  contextFindings: AgentFinding[]
 ) => {
   const payload = {
     workflow: definition.name,
@@ -167,9 +176,38 @@ const buildWorkerPrompt = (
     "Workflow context:",
     JSON.stringify(payload, null, 2),
     "",
+    ...(agent.contextFrom
+      ? [
+          "Prior phase context:",
+          contextFindings.length > 0
+            ? JSON.stringify(
+                {
+                  findings: contextFindings.map((finding, index) => ({
+                    source: {
+                      index: index + 1,
+                      phaseId: finding.phaseId,
+                      agentId: finding.agentId
+                    },
+                    verdict: finding.verdict,
+                    severity: finding.severity,
+                    summary: finding.summary,
+                    evidence: finding.evidence,
+                    repro: finding.repro,
+                    confidence: finding.confidence,
+                    details: finding.details
+                  }))
+                },
+                null,
+                2
+              )
+            : "No prior findings matched this agent's contextFrom selector.",
+          ""
+        ]
+      : []),
     "Output contract:",
     "- Be concrete and adversarial.",
     "- Do not invent findings. Mark uncertain claims as needs-human-review.",
+    '- If there are no findings or no assigned context to verify, return {"findings":[]}.',
     "- Return only JSON text, with this shape:",
     JSON.stringify(
       {
@@ -217,11 +255,13 @@ const parseAgentFindings = (
   const parsed = JSON.parse(extractJsonText(raw)) as unknown;
   const findings = Array.isArray(parsed)
     ? parsed
-    : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { findings?: unknown }).findings)
+    : typeof parsed === "object" &&
+        parsed !== null &&
+        Array.isArray((parsed as { findings?: unknown }).findings)
       ? (parsed as { findings: unknown[] }).findings
-      : [];
-  if (findings.length === 0) {
-    throw new Error("Worker output did not include a non-empty findings array.");
+      : undefined;
+  if (!findings) {
+    throw new Error("Worker output did not include a findings array.");
   }
   return findings.map((finding) =>
     AgentFindingSchema.parse({
@@ -231,6 +271,33 @@ const parseAgentFindings = (
       model: (finding as { model?: unknown }).model ?? model
     })
   );
+};
+
+const collectContextFindings = (
+  summary: RunSummary,
+  agent: AgentDefinition,
+  agentIndex: number,
+  phaseAgentCount: number
+) => {
+  const contextFrom = agent.contextFrom;
+  if (!contextFrom) {
+    return [];
+  }
+  const verdicts = contextFrom.verdicts ? new Set(contextFrom.verdicts) : undefined;
+  const findings = summary.agents
+    .filter((item) => contextFrom.phaseIds.includes(item.phaseId))
+    .flatMap((item) => item.findings ?? [])
+    .filter((finding) => !verdicts || verdicts.has(finding.verdict));
+  const maxFindings = contextFrom.maxFindings;
+  if (contextFrom.mode === "by-index") {
+    const size = maxFindings ?? 1;
+    return findings.slice(agentIndex * size, agentIndex * size + size);
+  }
+  if (contextFrom.mode === "round-robin") {
+    const assigned = findings.filter((_, index) => index % Math.max(1, phaseAgentCount) === agentIndex);
+    return maxFindings ? assigned.slice(0, maxFindings) : assigned;
+  }
+  return maxFindings ? findings.slice(0, maxFindings) : findings;
 };
 
 async function mapLimit<T>(
@@ -305,6 +372,7 @@ export class WorkflowRunner {
         modelMap: options.modelMap,
         promptSuffix: options.promptSuffix
       });
+      await this.store.clearControl(runId);
       await this.store.appendEvent({
         type: "run_started",
         runId,
@@ -330,14 +398,25 @@ export class WorkflowRunner {
           }
         }
       });
+      const control = await this.store.readControl(runId);
+      if (control?.type === "resume" || control?.type === "restart-agent") {
+        await this.store.clearControl(runId);
+      }
       await this.store.appendEvent({ type: "run_resumed", runId, at: nowIso() });
     }
 
+    const heartbeatTimer = setInterval(() => {
+      void this.touchRun(runId);
+    }, 2000);
     try {
+      const startedAt = nowIso();
       summary = {
         ...summary,
         status: "running",
-        startedAt: nowIso()
+        startedAt,
+        runnerPid: process.pid,
+        heartbeatAt: startedAt,
+        lastActivityAt: startedAt
       };
       refreshPhaseCounts(summary);
       await this.store.writeSummary(summary);
@@ -346,14 +425,23 @@ export class WorkflowRunner {
         await this.throwIfStopped(summary.id);
         await this.waitIfPaused(summary);
         summary = await this.startPhase(summary, phase.id);
-        await mapLimit(phase.agents, loaded.definition.maxConcurrency, async (agent) => {
+        await mapLimit(phase.agents, loaded.definition.maxConcurrency, async (agent, agentIndex) => {
           const existing = (await this.store.readSummary(summary.id)).agents.find(
             (item) => item.id === `${phase.id}:${agent.id}`
           );
           if (existing?.status === "completed") {
             return;
           }
-          await this.runAgent(summary, loaded.definition, phase.id, agent, adapter, options);
+          await this.runAgent(
+            summary,
+            loaded.definition,
+            phase.id,
+            agent,
+            agentIndex,
+            phase.agents.length,
+            adapter,
+            options
+          );
           summary = await this.store.readSummary(summary.id);
         });
         summary = await this.completePhase(summary, phase.id);
@@ -366,9 +454,11 @@ export class WorkflowRunner {
         summary = await this.store.readSummary(runId);
         summary.status = "stopped";
         summary.completedAt = nowIso();
+        summary.lastActivityAt = summary.completedAt;
         refreshPhaseCounts(summary);
         await this.store.writeSummary(summary);
         await this.store.appendEvent({ type: "run_stopped", runId, at: nowIso() });
+        await this.store.clearControl(runId);
         return summary;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -376,31 +466,38 @@ export class WorkflowRunner {
       summary.status = "failed";
       summary.error = message;
       summary.completedAt = nowIso();
+      summary.lastActivityAt = summary.completedAt;
       refreshPhaseCounts(summary);
       await this.store.writeSummary(summary);
       await this.store.appendEvent({ type: "run_failed", runId, at: nowIso(), error: message });
       throw error;
+    } finally {
+      clearInterval(heartbeatTimer);
     }
   }
 
   private async startPhase(summary: RunSummary, phaseId: string) {
+    const at = nowIso();
     const next = await this.mutateSummary(summary.id, (current) => {
+      current.lastActivityAt = at;
       current.selectedPhaseId = phaseId;
       current.phases = current.phases.map((phase) =>
-        phase.id === phaseId ? { ...phase, status: "running", startedAt: nowIso() } : phase
+        phase.id === phaseId ? { ...phase, status: "running", startedAt: at } : phase
       );
     });
     await this.store.appendEvent({
       type: "phase_started",
       runId: next.id,
       phaseId,
-      at: nowIso()
+      at
     });
     return next;
   }
 
   private async completePhase(summary: RunSummary, phaseId: string) {
+    const at = nowIso();
     const next = await this.mutateSummary(summary.id, (current) => {
+      current.lastActivityAt = at;
       const failed = current.agents.some(
         (agent) => agent.phaseId === phaseId && agent.status === "failed"
       );
@@ -409,7 +506,7 @@ export class WorkflowRunner {
           ? {
               ...phase,
               status: failed ? "failed" : "completed",
-              completedAt: nowIso()
+              completedAt: at
             }
           : phase
       );
@@ -418,7 +515,7 @@ export class WorkflowRunner {
       type: "phase_completed",
       runId: next.id,
       phaseId,
-      at: nowIso()
+      at
     });
     return next;
   }
@@ -428,6 +525,8 @@ export class WorkflowRunner {
     definition: WorkflowDefinition,
     phaseId: string,
     agentDefinition: AgentDefinition,
+    agentIndex: number,
+    phaseAgentCount: number,
     adapter: WorkerAdapter,
     options: RunWorkflowOptions
   ) {
@@ -435,11 +534,50 @@ export class WorkflowRunner {
     await this.waitIfPaused(summary);
     const agentId = `${phaseId}:${agentDefinition.id}`;
     const startedAt = nowIso();
+    const model = resolveAgentModel(phaseId, agentDefinition, options);
+    const contextSummary = await this.store.readSummary(summary.id);
+    const contextFindings = collectContextFindings(
+      contextSummary,
+      agentDefinition,
+      agentIndex,
+      phaseAgentCount
+    );
+    const workerSpec = {
+      id: agentId,
+      phaseId,
+      title: agentDefinition.title,
+      prompt: buildWorkerPrompt(
+        definition,
+        phaseId,
+        agentDefinition,
+        options.args ?? {},
+        options,
+        contextFindings
+      ),
+      cwd: contextSummary.cwd,
+      model,
+      reasoningEffort: agentDefinition.reasoningEffort ?? options.reasoningEffort,
+      sandbox: agentDefinition.sandbox,
+      expectedTokens: agentDefinition.expectedTokens,
+      expectedTools: agentDefinition.expectedTools,
+      durationMs: agentDefinition.durationMs
+    };
     let next = await this.mutateSummary(summary.id, (current) => {
+      current.lastActivityAt = startedAt;
       current.agents = current.agents.map((agent) =>
-        agent.id === agentId ? { ...agent, status: "running", startedAt } : agent
+        agent.id === agentId
+          ? {
+              ...agent,
+              prompt: workerSpec.prompt,
+              status: "running",
+              startedAt,
+              lastActivityAt: startedAt,
+              lastMessage: "started"
+            }
+          : agent
       );
     });
+    await this.store.writeAgentPrompt(next.id, agentId, workerSpec.prompt);
     await this.store.appendEvent({
       type: "agent_started",
       runId: next.id,
@@ -458,6 +596,7 @@ export class WorkflowRunner {
         }
         if (control?.type === "stop-agent" && control.agentId === agentId) {
           cancelledByStopAgent = true;
+          await this.store.clearControl(summary.id);
           abortController.abort();
         }
       })();
@@ -465,26 +604,6 @@ export class WorkflowRunner {
 
     let selectedAdapter = adapter.name === "auto" ? "" : adapter.name;
     try {
-      const model = resolveAgentModel(phaseId, agentDefinition, options);
-      const workerSpec = {
-        id: agentId,
-        phaseId,
-        title: agentDefinition.title,
-        prompt: buildWorkerPrompt(
-          definition,
-          phaseId,
-          agentDefinition,
-          options.args ?? {},
-          options
-        ),
-        cwd: next.cwd,
-        model,
-        reasoningEffort: agentDefinition.reasoningEffort ?? options.reasoningEffort,
-        sandbox: agentDefinition.sandbox,
-        expectedTokens: agentDefinition.expectedTokens,
-        expectedTools: agentDefinition.expectedTools,
-        durationMs: agentDefinition.durationMs
-      };
       let result: Awaited<ReturnType<WorkerAdapter["runWorker"]>> | undefined;
       let findings: AgentFinding[] | undefined;
       let validationError = "";
@@ -498,13 +617,14 @@ export class WorkflowRunner {
                 : `${workerSpec.prompt}\n\nPrevious output was invalid: ${validationError}\nReturn valid JSON text only.`
           },
           async (progress) => {
+            const at = nowIso();
             if (progress.actualAdapter && progress.actualAdapter !== selectedAdapter) {
               selectedAdapter = progress.actualAdapter;
               await this.store.appendEvent({
                 type: "adapter_selected",
                 runId: summary.id,
                 agentId,
-                at: nowIso(),
+                at,
                 requestedAdapter:
                   adapter.name === "auto" ||
                   adapter.name === "simulate" ||
@@ -517,6 +637,8 @@ export class WorkflowRunner {
               });
             }
             const current = await this.mutateSummary(summary.id, (draft) => {
+              draft.heartbeatAt = at;
+              draft.lastActivityAt = at;
               if (progress.actualAdapter) {
                 draft.actualAdapter = progress.actualAdapter;
               }
@@ -527,6 +649,14 @@ export class WorkflowRunner {
                       tokens: progress.tokens ?? agent.tokens,
                       tools: progress.tools ?? agent.tools,
                       actualAdapter: progress.actualAdapter ?? agent.actualAdapter,
+                      lastActivityAt: at,
+                      lastMessage:
+                        progress.message ??
+                        (progress.tokens !== undefined
+                          ? "token usage updated"
+                          : progress.tools !== undefined
+                            ? "tool usage updated"
+                            : agent.lastMessage),
                       attempts: attempt
                     }
                   : agent
@@ -536,7 +666,7 @@ export class WorkflowRunner {
               type: "agent_updated",
               runId: current.id,
               agentId,
-              at: nowIso(),
+              at,
               tokens: progress.tokens,
               tools: progress.tools,
               message: progress.message
@@ -546,7 +676,7 @@ export class WorkflowRunner {
                 type: "agent_tool_event",
                 runId: current.id,
                 agentId,
-                at: nowIso(),
+                at,
                 kind: "message",
                 text: progress.message
               });
@@ -556,12 +686,13 @@ export class WorkflowRunner {
         );
         lastRawOutput = result.output;
         if (result.actualAdapter && result.actualAdapter !== selectedAdapter) {
+          const at = nowIso();
           selectedAdapter = result.actualAdapter;
           await this.store.appendEvent({
             type: "adapter_selected",
             runId: next.id,
             agentId,
-            at: nowIso(),
+            at,
             requestedAdapter:
               adapter.name === "auto" ||
               adapter.name === "simulate" ||
@@ -592,7 +723,10 @@ export class WorkflowRunner {
         throw new Error(`Worker result validation failed after retry: ${validationError}`);
       }
       let completedAgent: AgentSummary | undefined;
+      const completedAt = nowIso();
       next = await this.mutateSummary(summary.id, (current) => {
+        current.heartbeatAt = completedAt;
+        current.lastActivityAt = completedAt;
         if (result.actualAdapter ?? selectedAdapter) {
           current.actualAdapter = result.actualAdapter ?? selectedAdapter;
         }
@@ -610,7 +744,9 @@ export class WorkflowRunner {
             result: result.output,
             rawResult: result.output,
             findings,
-            completedAt: nowIso()
+            completedAt,
+            lastActivityAt: completedAt,
+            lastMessage: "completed"
           };
           return completedAgent;
         });
@@ -623,7 +759,7 @@ export class WorkflowRunner {
         runId: next.id,
         phaseId,
         agentId,
-        at: nowIso(),
+        at: completedAt,
         tokens: result.tokens,
         tools: result.tools,
         elapsedMs: result.elapsedMs
@@ -637,19 +773,24 @@ export class WorkflowRunner {
         }
       }
       const message = error instanceof Error ? error.message : String(error);
+      const completedAt = nowIso();
       next = await this.mutateSummary(summary.id, (current) => {
+        current.heartbeatAt = completedAt;
+        current.lastActivityAt = completedAt;
         if (selectedAdapter) {
           current.actualAdapter = selectedAdapter;
         }
         current.agents = current.agents.map((agent) =>
           agent.id === agentId
             ? {
-              ...agent,
+                ...agent,
                 status: cancelledByStopAgent ? "cancelled" : "failed",
                 error: cancelledByStopAgent ? undefined : message,
                 actualAdapter: selectedAdapter || agent.actualAdapter,
                 rawResult: lastRawOutput || agent.rawResult,
-                completedAt: nowIso()
+                completedAt,
+                lastActivityAt: completedAt,
+                lastMessage: cancelledByStopAgent ? "cancelled" : message
               }
             : agent
         );
@@ -661,14 +802,14 @@ export class WorkflowRunner {
               runId: next.id,
               phaseId,
               agentId,
-              at: nowIso()
+              at: completedAt
             }
           : {
               type: "agent_failed",
               runId: next.id,
               phaseId,
               agentId,
-              at: nowIso(),
+              at: completedAt,
               error: message
             }
       );
@@ -680,8 +821,11 @@ export class WorkflowRunner {
   private async completeRun(summary: RunSummary) {
     const next = await this.store.readSummary(summary.id);
     refreshPhaseCounts(next);
+    const completedAt = nowIso();
     next.status = next.totals.failedAgents > 0 ? "failed" : "completed";
-    next.completedAt = nowIso();
+    next.completedAt = completedAt;
+    next.heartbeatAt = completedAt;
+    next.lastActivityAt = completedAt;
     const markdown = this.buildFinalReport(next);
     const finalReportPath = await this.store.writeFinalReport(next.id, markdown);
     next.finalReportPath = finalReportPath;
@@ -816,11 +960,24 @@ export class WorkflowRunner {
         throw new WorkflowStoppedError();
       }
     }
+    if (control?.type === "resume") {
+      await this.store.clearControl(summary.id);
+    }
     next = await this.store.readSummary(summary.id);
     next.status = "running";
     refreshPhaseCounts(next);
     await this.store.writeSummary(next);
     await this.store.appendEvent({ type: "run_resumed", runId: summary.id, at: nowIso() });
+  }
+
+  private async touchRun(runId: string) {
+    await this.mutateSummary(runId, (summary) => {
+      if (summary.status !== "running" && summary.status !== "paused") {
+        return;
+      }
+      summary.runnerPid = process.pid;
+      summary.heartbeatAt = nowIso();
+    }).catch(() => undefined);
   }
 
   private async mutateSummary(

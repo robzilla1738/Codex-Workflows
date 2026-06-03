@@ -36,6 +36,9 @@ export const ReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high",
 export const WorkerAdapterNameSchema = z.enum(["auto", "simulate", "exec", "sdk"]);
 export const StorageScopeSchema = z.enum(["codex-home", "project"]);
 
+export const MAX_WORKFLOW_CONCURRENCY = 64;
+export const MAX_WORKFLOW_AGENTS = 2000;
+
 export const FindingVerdictSchema = z.enum([
   "confirmed",
   "false-positive",
@@ -43,6 +46,13 @@ export const FindingVerdictSchema = z.enum([
 ]);
 
 export const FindingSeveritySchema = z.enum(["blocker", "high", "medium", "low"]);
+
+export const ContextFromSchema = z.object({
+  phaseIds: z.array(z.string().min(1)).min(1),
+  verdicts: z.array(FindingVerdictSchema).optional(),
+  mode: z.enum(["all", "by-index", "round-robin"]).default("all"),
+  maxFindings: z.number().int().positive().optional()
+});
 
 export const AgentFindingSchema = z.object({
   verdict: FindingVerdictSchema,
@@ -64,6 +74,7 @@ export const AgentDefinitionSchema = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffortSchema.optional(),
   sandbox: SandboxModeSchema.default("read-only"),
+  contextFrom: ContextFromSchema.optional(),
   expectedTokens: z.number().int().nonnegative().optional(),
   expectedTools: z.number().int().nonnegative().optional(),
   durationMs: z.number().int().nonnegative().optional()
@@ -79,8 +90,8 @@ export const WorkflowDefinitionSchema = z.object({
   name: z.string().min(1),
   version: z.string().min(1).default("1"),
   description: z.string().min(1),
-  maxConcurrency: z.number().int().positive().max(16).default(16),
-  maxAgents: z.number().int().positive().max(1000).default(1000),
+  maxConcurrency: z.number().int().positive().max(MAX_WORKFLOW_CONCURRENCY).default(16),
+  maxAgents: z.number().int().positive().max(MAX_WORKFLOW_AGENTS).default(1000),
   phases: z.array(PhaseDefinitionSchema).min(1)
 });
 
@@ -114,7 +125,9 @@ export const AgentSummarySchema = z.object({
   error: z.string().optional(),
   attempts: z.number().int().nonnegative().default(0),
   startedAt: z.string().optional(),
-  completedAt: z.string().optional()
+  completedAt: z.string().optional(),
+  lastActivityAt: z.string().optional(),
+  lastMessage: z.string().optional()
 });
 
 export const RunTotalsSchema = z.object({
@@ -143,6 +156,9 @@ export const RunSummarySchema = z.object({
   updatedAt: z.string(),
   startedAt: z.string().optional(),
   completedAt: z.string().optional(),
+  runnerPid: z.number().int().positive().optional(),
+  heartbeatAt: z.string().optional(),
+  lastActivityAt: z.string().optional(),
   selectedPhaseId: z.string().optional(),
   phases: z.array(PhaseSummarySchema),
   agents: z.array(AgentSummarySchema),
@@ -316,6 +332,7 @@ export type SandboxMode = z.infer<typeof SandboxModeSchema>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
 export type WorkerAdapterName = z.infer<typeof WorkerAdapterNameSchema>;
 export type StorageScope = z.infer<typeof StorageScopeSchema>;
+export type ContextFrom = z.infer<typeof ContextFromSchema>;
 export type AgentFinding = z.infer<typeof AgentFindingSchema>;
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 export type PhaseDefinition = z.infer<typeof PhaseDefinitionSchema>;

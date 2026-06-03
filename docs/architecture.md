@@ -40,6 +40,9 @@ started by either the CLI or MCP server.
 
 MCP launches use a detached worker process. That matters: a workflow should keep
 running if the Codex thread disconnects or the MCP request finishes.
+Detached workers write heartbeats into `status.json`; status/list/dashboard
+reads reconcile stale runs when the recorded runner process is gone and the
+heartbeat has aged out.
 
 ## Resume and restart
 
@@ -55,9 +58,16 @@ relaunches the workflow in resume mode.
 Workflow scripts are loaded in QuickJS. The script can define workflow metadata,
 phases, and agent prompts. It does not get Node globals, direct filesystem
 access, shell access, network access, process env, or dynamic imports.
+Workflow definitions may request up to 64 concurrent workers and 2000 total
+agents; the actual worker count is still determined by the agents declared in
+the workflow phases.
 
 Actual code review work happens in Codex worker adapters, under explicit sandbox
 and approval settings.
+
+Agents may declare `contextFrom` to receive prior phase findings. Built-in
+workflows use that for verify, probe, and synthesize phases so later agents
+review concrete earlier claims instead of generic instructions.
 
 ## Generated plugin
 

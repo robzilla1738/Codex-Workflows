@@ -1,10 +1,31 @@
+const verifyContext = {
+  phaseIds: ["find"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "by-index",
+  maxFindings: 1
+};
+
+const probeContext = {
+  phaseIds: ["verify"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "all",
+  maxFindings: 12
+};
+
+const synthesizeContext = {
+  phaseIds: ["verify", "probe"],
+  verdicts: ["confirmed", "needs-human-review"],
+  mode: "all",
+  maxFindings: 20
+};
+
 export default workflow({
   name: "bug-sweep",
-  version: "1",
+  version: "2",
   description:
-    "Codebase-wide adversarial bug sweep with independent finding, verification, repro planning, and synthesis.",
-  maxConcurrency: 16,
-  maxAgents: 64,
+    "Bounded codebase-wide bug sweep with independent finding, verification, repro planning, and synthesis.",
+  maxConcurrency: 64,
+  maxAgents: 2000,
   phases: [
     {
       id: "find",
@@ -23,42 +44,28 @@ export default workflow({
             "Audit schemas, parsing, serialization, migrations, and compatibility contracts for bugs. Return strict JSON findings only."
         },
         {
-          id: "cli-mcp-surfaces",
-          title: "cli-mcp-surfaces",
+          id: "public-interfaces",
+          title: "public-interfaces",
           prompt:
-            "Audit CLI and MCP public interfaces for broken flags, invalid defaults, missing validation, and workflow control bugs. Return strict JSON findings only."
+            "Audit public interfaces such as CLI, API, plugin, config, and integration surfaces for broken flags, invalid defaults, missing validation, and control bugs. Return strict JSON findings only."
         },
         {
-          id: "ui-tui",
-          title: "ui-tui",
+          id: "user-facing-flows",
+          title: "user-facing-flows",
           prompt:
-            "Audit terminal UI behavior for broken navigation, unreadable states, overflow, stale status, and control mismatches. Return strict JSON findings only."
-        },
-        {
-          id: "adapter-streaming",
-          title: "adapter-streaming",
-          prompt:
-            "Audit Codex SDK and exec adapter streaming behavior, token/tool accounting, cancellation, and error handling. Return strict JSON findings only."
-        },
-        {
-          id: "persistence-resume",
-          title: "persistence-resume",
-          prompt:
-            "Audit run persistence, checkpoint/resume, restart-agent, event logs, and artifact durability. Return strict JSON findings only."
+            "Audit user-facing flows for broken navigation, unreadable states, overflow, stale status, missing feedback, and workflow mismatches. Return strict JSON findings only."
         }
       ]
     },
     {
       id: "verify",
       title: "Verify",
-      agents: Array.from({ length: 12 }, (_, index) => ({
+      agents: Array.from({ length: 4 }, (_, index) => ({
         id: `claim-${String(index + 1).padStart(2, "0")}`,
         title: `claim-${String(index + 1).padStart(2, "0")}`,
         prompt:
-          "Adversarially verify one candidate bug from the find phase. Try to disprove it first. Return confirmed, false-positive, or needs-human-review as strict JSON findings only.",
-        expectedTokens: 64000 + index * 1200,
-        expectedTools: 34 + (index % 13),
-        durationMs: 430 + index * 20
+          "Adversarially verify the assigned candidate bug from the find phase. Try to disprove it first. Return confirmed, false-positive, or needs-human-review as strict JSON findings only.",
+        contextFrom: verifyContext
       }))
     },
     {
@@ -66,16 +73,11 @@ export default workflow({
       title: "Probe",
       agents: [
         {
-          id: "minimal-repros",
-          title: "minimal-repros",
+          id: "repro-and-tests",
+          title: "repro-and-tests",
           prompt:
-            "For confirmed or plausible bugs, design minimal repro commands/tests. Mark anything unproven as needs-human-review. Return strict JSON findings only."
-        },
-        {
-          id: "regression-tests",
-          title: "regression-tests",
-          prompt:
-            "Map confirmed bugs to exact regression test files, test names, and acceptance criteria. Return strict JSON findings only."
+            "For confirmed or plausible bugs, design minimal repro commands or manual steps and map them to exact regression test acceptance criteria. Return strict JSON findings only.",
+          contextFrom: probeContext
         }
       ]
     },
@@ -87,7 +89,8 @@ export default workflow({
           id: "bug-report",
           title: "bug-report",
           prompt:
-            "Synthesize confirmed bugs, false positives, and needs-human-review items into a prioritized bug report. Return strict JSON findings only."
+            "Synthesize confirmed bugs, false positives, and needs-human-review items into a prioritized bug report. Return strict JSON findings only.",
+          contextFrom: synthesizeContext
         }
       ]
     }

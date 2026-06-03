@@ -139,8 +139,8 @@ Use a small DSL that mirrors Claude's model while staying vendor-neutral:
 export default workflow({
   name: "branch-review",
   version: "1",
-  maxConcurrency: 16,
-  maxAgents: 1000,
+  maxConcurrency: 64,
+  maxAgents: 2000,
   async run({ args, agent, phase, checkpoint, budget }) {
     const files = args.files;
 

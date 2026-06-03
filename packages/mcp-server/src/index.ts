@@ -157,6 +157,7 @@ const writeDashboardCommand = async (
     [
       "#!/bin/zsh",
       `printf '\\033[8;${rows};${columns}t'`,
+      "printf '\\033[2J\\033[H'",
       `cd ${quoteShell(root)} || exit 1`,
       `exec ${quoteShell(process.execPath)} ${quoteShell(cliPathFor(root))} watch ${quoteShell(
         runId
@@ -342,7 +343,7 @@ const storeFor = (root: string, storageScope: StorageScope = "codex-home", store
 const server = new McpServer(
   {
     name: "codex-workflows",
-    version: "0.1.0"
+    version: "0.2.0"
   },
   {
     instructions:
@@ -368,8 +369,8 @@ server.registerTool(
       storeRoot: z.string().optional(),
       openTui: z.boolean().default(true),
       terminalApp: z.enum(["default", "auto", "harness", "terminal"]).default("default"),
-      terminalColumns: z.number().int().min(100).max(300).default(190),
-      terminalRows: z.number().int().min(24).max(80).default(42),
+      terminalColumns: z.number().int().min(100).max(500).default(190),
+      terminalRows: z.number().int().min(24).max(120).default(42),
       cwd: cwdSchema
     }
   },
@@ -513,7 +514,8 @@ server.registerTool(
           title: agent.title,
           model: agent.model,
           reasoningEffort: agent.reasoningEffort,
-          sandbox: agent.sandbox
+          sandbox: agent.sandbox,
+          contextFrom: agent.contextFrom
         }))
       })),
       hash: loaded.hash
@@ -670,6 +672,7 @@ server.registerTool(
     const root = path.resolve(cwd ?? process.cwd());
     const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(root, storageScope);
     const store = storeFor(root, storageScope, resolvedStoreRoot);
+    await store.clearControl(runId);
     const summary = await store.markAgentForRestart(runId, agentId);
     const manifest = await store.readManifest(runId);
     const launch = manifest.launch ?? {};
@@ -690,11 +693,6 @@ server.registerTool(
       storageScope,
       storeRoot: resolvedStoreRoot,
       resume: true
-    });
-    await store.writeControl(runId, {
-      type: "restart-agent",
-      at: nowIso(),
-      agentId
     });
     return text({ runId, agentId, command: "restart-agent", workerPid });
   }

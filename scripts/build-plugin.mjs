@@ -121,8 +121,8 @@ await writeFile(
           command: "node",
           args: ["dist/mcp-server.js"],
           cwd: ".",
-          startup_timeout_sec: 20,
-          tool_timeout_sec: 600
+          startup_timeout_sec: 30,
+          tool_timeout_sec: 1800
         }
       }
     },

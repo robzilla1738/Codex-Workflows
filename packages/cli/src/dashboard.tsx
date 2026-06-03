@@ -53,6 +53,21 @@ const phaseColor = (status: string, active: boolean) => {
   return "gray";
 };
 
+const effectiveAgentElapsed = (agent: AgentSummary) =>
+  agent.status === "running" && agent.startedAt
+    ? Math.max(0, Date.now() - new Date(agent.startedAt).getTime())
+    : agent.elapsedMs;
+
+const formatAgentTokens = (agent: AgentSummary) =>
+  agent.status === "running" && agent.tokens === 0 ? "tok pending" : `${formatCount(agent.tokens)} tok`;
+
+const formatActivity = (at?: string) => {
+  if (!at) {
+    return "no activity";
+  }
+  return `idle ${formatDuration(Math.max(0, Date.now() - new Date(at).getTime()))}`;
+};
+
 export function DashboardFrame({
   summary,
   width,
@@ -168,8 +183,8 @@ export function DashboardFrame({
                 </Text>
               </Box>
               <Text color="gray">
-                {formatCount(agent.tokens)} tok · {agent.tools} tools ·{" "}
-                {formatDuration(agent.elapsedMs)}
+                {formatAgentTokens(agent)} · {agent.tools} tools ·{" "}
+                {formatDuration(effectiveAgentElapsed(agent))}
               </Text>
             </Box>
           ))}
@@ -197,11 +212,28 @@ export function DashboardFrame({
               </Text>
             ))
           ) : (
-            <Text color="gray">
-              {selectedAgent.status === "running"
-                ? "Agent is running. Live token/tool metrics update above."
-                : truncateMiddle(selectedAgent.error ?? selectedAgent.prompt, width - 4)}
-            </Text>
+            <>
+              <Text color="gray">
+                {selectedAgent.status === "running"
+                  ? truncateMiddle(
+                      `Agent is running. ${formatActivity(
+                        selectedAgent.lastActivityAt ?? selectedAgent.startedAt
+                      )}. ${selectedAgent.lastMessage ?? "Waiting for worker events."}`,
+                      width - 4
+                    )
+                  : truncateMiddle(selectedAgent.error ?? selectedAgent.prompt, width - 4)}
+              </Text>
+              {selectedAgent.lastActivityAt && selectedAgent.status !== "running" ? (
+                <Text color="gray">
+                  {truncateMiddle(
+                    `Last activity: ${selectedAgent.lastActivityAt}${
+                      selectedAgent.lastMessage ? ` · ${selectedAgent.lastMessage}` : ""
+                    }`,
+                    width - 4
+                  )}
+                </Text>
+              ) : null}
+            </>
           )}
         </Box>
       ) : null}

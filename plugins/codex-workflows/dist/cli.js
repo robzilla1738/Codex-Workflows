@@ -57894,12 +57894,20 @@ var SandboxModeSchema = external_exports.enum([
 var ReasoningEffortSchema = external_exports.enum(["minimal", "low", "medium", "high", "xhigh"]);
 var WorkerAdapterNameSchema = external_exports.enum(["auto", "simulate", "exec", "sdk"]);
 var StorageScopeSchema = external_exports.enum(["codex-home", "project"]);
+var MAX_WORKFLOW_CONCURRENCY = 64;
+var MAX_WORKFLOW_AGENTS = 2e3;
 var FindingVerdictSchema = external_exports.enum([
   "confirmed",
   "false-positive",
   "needs-human-review"
 ]);
 var FindingSeveritySchema = external_exports.enum(["blocker", "high", "medium", "low"]);
+var ContextFromSchema = external_exports.object({
+  phaseIds: external_exports.array(external_exports.string().min(1)).min(1),
+  verdicts: external_exports.array(FindingVerdictSchema).optional(),
+  mode: external_exports.enum(["all", "by-index", "round-robin"]).default("all"),
+  maxFindings: external_exports.number().int().positive().optional()
+});
 var AgentFindingSchema = external_exports.object({
   verdict: FindingVerdictSchema,
   severity: FindingSeveritySchema,
@@ -57919,6 +57927,7 @@ var AgentDefinitionSchema = external_exports.object({
   model: external_exports.string().min(1).optional(),
   reasoningEffort: ReasoningEffortSchema.optional(),
   sandbox: SandboxModeSchema.default("read-only"),
+  contextFrom: ContextFromSchema.optional(),
   expectedTokens: external_exports.number().int().nonnegative().optional(),
   expectedTools: external_exports.number().int().nonnegative().optional(),
   durationMs: external_exports.number().int().nonnegative().optional()
@@ -57932,8 +57941,8 @@ var WorkflowDefinitionSchema = external_exports.object({
   name: external_exports.string().min(1),
   version: external_exports.string().min(1).default("1"),
   description: external_exports.string().min(1),
-  maxConcurrency: external_exports.number().int().positive().max(16).default(16),
-  maxAgents: external_exports.number().int().positive().max(1e3).default(1e3),
+  maxConcurrency: external_exports.number().int().positive().max(MAX_WORKFLOW_CONCURRENCY).default(16),
+  maxAgents: external_exports.number().int().positive().max(MAX_WORKFLOW_AGENTS).default(1e3),
   phases: external_exports.array(PhaseDefinitionSchema).min(1)
 });
 var PhaseSummarySchema = external_exports.object({
@@ -57965,7 +57974,9 @@ var AgentSummarySchema = external_exports.object({
   error: external_exports.string().optional(),
   attempts: external_exports.number().int().nonnegative().default(0),
   startedAt: external_exports.string().optional(),
-  completedAt: external_exports.string().optional()
+  completedAt: external_exports.string().optional(),
+  lastActivityAt: external_exports.string().optional(),
+  lastMessage: external_exports.string().optional()
 });
 var RunTotalsSchema = external_exports.object({
   totalAgents: external_exports.number().int().nonnegative(),
@@ -57992,6 +58003,9 @@ var RunSummarySchema = external_exports.object({
   updatedAt: external_exports.string(),
   startedAt: external_exports.string().optional(),
   completedAt: external_exports.string().optional(),
+  runnerPid: external_exports.number().int().positive().optional(),
+  heartbeatAt: external_exports.string().optional(),
+  lastActivityAt: external_exports.string().optional(),
   selectedPhaseId: external_exports.string().optional(),
   phases: external_exports.array(PhaseSummarySchema),
   agents: external_exports.array(AgentSummarySchema),
@@ -58640,6 +58654,10 @@ import { homedir } from "node:os";
 import path3 from "node:path";
 var elapsed = (startedAt) => startedAt ? Math.max(0, Date.now() - new Date(startedAt).getTime()) : 0;
 var refreshSummaryCounts = (summary) => {
+  summary.agents = summary.agents.map((agent) => agent.status === "running" && agent.startedAt ? {
+    ...agent,
+    elapsedMs: elapsed(agent.startedAt)
+  } : agent);
   summary.phases = summary.phases.map((phase) => {
     const agents = summary.agents.filter((agent) => agent.phaseId === phase.id);
     return {
@@ -58663,16 +58681,32 @@ var codexHome = () => process.env.CODEX_HOME ?? path3.join(homedir(), ".codex");
 var projectHash = (cwd2) => createHash2("sha256").update(path3.resolve(cwd2)).digest("hex").slice(0, 16);
 var defaultStoreRoot = (cwd2, storageScope = "codex-home") => storageScope === "project" ? projectStoreRoot(cwd2) : path3.join(codexHome(), "codex-workflows", "projects", projectHash(cwd2));
 var dirExists = (candidate) => existsSync2(candidate);
+var defaultStaleHeartbeatMs = () => {
+  const raw = process.env.CODEX_WORKFLOWS_STALE_HEARTBEAT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1e3;
+};
+var processIsAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+var cloneSummary = (summary) => RunSummarySchema.parse(JSON.parse(JSON.stringify(summary)));
 var RunStore = class {
   cwd;
   root;
   storageScope;
   projectRoot;
+  staleHeartbeatMs;
   constructor(cwd2, options = {}) {
     this.cwd = cwd2;
     this.storageScope = options.storageScope ?? "codex-home";
     this.projectRoot = projectStoreRoot(cwd2);
     this.root = options.storeRoot ?? defaultStoreRoot(cwd2, this.storageScope);
+    this.staleHeartbeatMs = options.staleHeartbeatMs ?? defaultStaleHeartbeatMs();
   }
   runDir(runId) {
     const primary = path3.join(this.root, "runs", runId);
@@ -58752,13 +58786,55 @@ var RunStore = class {
     let lastError;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        return RunSummarySchema.parse(JSON.parse(await readFile2(this.statusPath(runId), "utf8")));
+        const parsed = RunSummarySchema.parse(JSON.parse(await readFile2(this.statusPath(runId), "utf8")));
+        return await this.reconcileSummary(parsed);
       } catch (error51) {
         lastError = error51;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
     }
     throw lastError;
+  }
+  async reconcileSummary(summary) {
+    const next = cloneSummary(summary);
+    refreshSummaryCounts(next);
+    if (next.status !== "running" && next.status !== "paused") {
+      return next;
+    }
+    if (!next.runnerPid || processIsAlive(next.runnerPid)) {
+      return next;
+    }
+    const heartbeatAt = next.heartbeatAt ?? next.lastActivityAt;
+    if (!heartbeatAt) {
+      return next;
+    }
+    const staleForMs = Date.now() - new Date(heartbeatAt).getTime();
+    if (staleForMs < this.staleHeartbeatMs) {
+      return next;
+    }
+    const at = nowIso();
+    const error51 = `Workflow runner process ${next.runnerPid} is not running and heartbeat is stale since ${heartbeatAt}.`;
+    next.status = "failed";
+    next.error = error51;
+    next.completedAt = at;
+    next.lastActivityAt = at;
+    next.agents = next.agents.map((agent) => agent.status === "running" ? {
+      ...agent,
+      status: "failed",
+      error: error51,
+      completedAt: at,
+      lastActivityAt: at,
+      lastMessage: "runner orphaned"
+    } : agent);
+    next.phases = next.phases.map((phase) => phase.status === "running" || phase.status === "paused" ? {
+      ...phase,
+      status: "failed",
+      completedAt: at
+    } : phase);
+    refreshSummaryCounts(next);
+    await this.writeSummary(next);
+    await this.appendEvent({ type: "run_failed", runId: next.id, at, error: error51 }).catch(() => void 0);
+    return next;
   }
   async appendEvent(event) {
     const parsed = WorkflowEventSchema.parse(event);
@@ -58816,6 +58892,12 @@ var RunStore = class {
     await writeFile(path3.join(dir, "result.json"), `${JSON.stringify(agent, null, 2)}
 `);
   }
+  async writeAgentPrompt(runId, agentId, prompt) {
+    const dir = this.agentDir(runId, agentId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path3.join(dir, "prompt.md"), `${prompt}
+`);
+  }
   async writeFinalReport(runId, markdown) {
     const finalReportPath = path3.join(this.runDir(runId), "final.md");
     await writeFile(finalReportPath, markdown);
@@ -58838,6 +58920,12 @@ var RunStore = class {
       rawResult: void 0,
       findings: void 0,
       completedAt: void 0,
+      startedAt: void 0,
+      lastActivityAt: void 0,
+      lastMessage: void 0,
+      tokens: 0,
+      tools: 0,
+      elapsedMs: 0,
       attempts: 0
     } : item);
     summary.phases = summary.phases.map((phase) => phase.id === agent.phaseId ? {
@@ -58897,6 +58985,10 @@ var buildTotals = (summary) => ({
   elapsedMs: elapsed2(summary.startedAt)
 });
 var refreshPhaseCounts = (summary) => {
+  summary.agents = summary.agents.map((agent) => agent.status === "running" && agent.startedAt ? {
+    ...agent,
+    elapsedMs: elapsed2(agent.startedAt)
+  } : agent);
   summary.phases = summary.phases.map((phase) => {
     const agents = summary.agents.filter((agent) => agent.phaseId === phase.id);
     return {
@@ -58959,7 +59051,7 @@ var createInitialSummary = (runId, definition, workflowPath, cwd2, options) => {
   };
 };
 var resolveAgentModel2 = (phaseId, agent, options) => options.modelMap?.[`${phaseId}:${agent.id}`] ?? options.modelMap?.[agent.id] ?? options.modelMap?.[phaseId] ?? options.defaultModel ?? agent.model;
-var buildWorkerPrompt = (definition, phaseId, agent, args, options) => {
+var buildWorkerPrompt = (definition, phaseId, agent, args, options, contextFindings) => {
   const payload = {
     workflow: definition.name,
     version: definition.version,
@@ -58976,9 +59068,30 @@ var buildWorkerPrompt = (definition, phaseId, agent, args, options) => {
     "Workflow context:",
     JSON.stringify(payload, null, 2),
     "",
+    ...agent.contextFrom ? [
+      "Prior phase context:",
+      contextFindings.length > 0 ? JSON.stringify({
+        findings: contextFindings.map((finding, index) => ({
+          source: {
+            index: index + 1,
+            phaseId: finding.phaseId,
+            agentId: finding.agentId
+          },
+          verdict: finding.verdict,
+          severity: finding.severity,
+          summary: finding.summary,
+          evidence: finding.evidence,
+          repro: finding.repro,
+          confidence: finding.confidence,
+          details: finding.details
+        }))
+      }, null, 2) : "No prior findings matched this agent's contextFrom selector.",
+      ""
+    ] : [],
     "Output contract:",
     "- Be concrete and adversarial.",
     "- Do not invent findings. Mark uncertain claims as needs-human-review.",
+    '- If there are no findings or no assigned context to verify, return {"findings":[]}.',
     "- Return only JSON text, with this shape:",
     JSON.stringify({
       findings: [
@@ -59011,9 +59124,9 @@ var extractJsonText = (text) => {
 };
 var parseAgentFindings = (raw, agentId, phaseId, model) => {
   const parsed = JSON.parse(extractJsonText(raw));
-  const findings = Array.isArray(parsed) ? parsed : typeof parsed === "object" && parsed !== null && Array.isArray(parsed.findings) ? parsed.findings : [];
-  if (findings.length === 0) {
-    throw new Error("Worker output did not include a non-empty findings array.");
+  const findings = Array.isArray(parsed) ? parsed : typeof parsed === "object" && parsed !== null && Array.isArray(parsed.findings) ? parsed.findings : void 0;
+  if (!findings) {
+    throw new Error("Worker output did not include a findings array.");
   }
   return findings.map((finding) => AgentFindingSchema.parse({
     ...finding,
@@ -59021,6 +59134,24 @@ var parseAgentFindings = (raw, agentId, phaseId, model) => {
     phaseId,
     model: finding.model ?? model
   }));
+};
+var collectContextFindings = (summary, agent, agentIndex, phaseAgentCount) => {
+  const contextFrom = agent.contextFrom;
+  if (!contextFrom) {
+    return [];
+  }
+  const verdicts = contextFrom.verdicts ? new Set(contextFrom.verdicts) : void 0;
+  const findings = summary.agents.filter((item) => contextFrom.phaseIds.includes(item.phaseId)).flatMap((item) => item.findings ?? []).filter((finding) => !verdicts || verdicts.has(finding.verdict));
+  const maxFindings = contextFrom.maxFindings;
+  if (contextFrom.mode === "by-index") {
+    const size = maxFindings ?? 1;
+    return findings.slice(agentIndex * size, agentIndex * size + size);
+  }
+  if (contextFrom.mode === "round-robin") {
+    const assigned = findings.filter((_, index) => index % Math.max(1, phaseAgentCount) === agentIndex);
+    return maxFindings ? assigned.slice(0, maxFindings) : assigned;
+  }
+  return maxFindings ? findings.slice(0, maxFindings) : findings;
 };
 async function mapLimit(items, limit, run) {
   let next = 0;
@@ -59076,6 +59207,7 @@ var WorkflowRunner = class {
         modelMap: options.modelMap,
         promptSuffix: options.promptSuffix
       });
+      await this.store.clearControl(runId);
       await this.store.appendEvent({
         type: "run_started",
         runId,
@@ -59101,13 +59233,24 @@ var WorkflowRunner = class {
           }
         }
       });
+      const control = await this.store.readControl(runId);
+      if (control?.type === "resume" || control?.type === "restart-agent") {
+        await this.store.clearControl(runId);
+      }
       await this.store.appendEvent({ type: "run_resumed", runId, at: nowIso() });
     }
+    const heartbeatTimer = setInterval(() => {
+      void this.touchRun(runId);
+    }, 2e3);
     try {
+      const startedAt = nowIso();
       summary = {
         ...summary,
         status: "running",
-        startedAt: nowIso()
+        startedAt,
+        runnerPid: process.pid,
+        heartbeatAt: startedAt,
+        lastActivityAt: startedAt
       };
       refreshPhaseCounts(summary);
       await this.store.writeSummary(summary);
@@ -59115,12 +59258,12 @@ var WorkflowRunner = class {
         await this.throwIfStopped(summary.id);
         await this.waitIfPaused(summary);
         summary = await this.startPhase(summary, phase.id);
-        await mapLimit(phase.agents, loaded.definition.maxConcurrency, async (agent) => {
+        await mapLimit(phase.agents, loaded.definition.maxConcurrency, async (agent, agentIndex) => {
           const existing = (await this.store.readSummary(summary.id)).agents.find((item) => item.id === `${phase.id}:${agent.id}`);
           if (existing?.status === "completed") {
             return;
           }
-          await this.runAgent(summary, loaded.definition, phase.id, agent, adapter, options);
+          await this.runAgent(summary, loaded.definition, phase.id, agent, agentIndex, phase.agents.length, adapter, options);
           summary = await this.store.readSummary(summary.id);
         });
         summary = await this.completePhase(summary, phase.id);
@@ -59132,9 +59275,11 @@ var WorkflowRunner = class {
         summary = await this.store.readSummary(runId);
         summary.status = "stopped";
         summary.completedAt = nowIso();
+        summary.lastActivityAt = summary.completedAt;
         refreshPhaseCounts(summary);
         await this.store.writeSummary(summary);
         await this.store.appendEvent({ type: "run_stopped", runId, at: nowIso() });
+        await this.store.clearControl(runId);
         return summary;
       }
       const message = error51 instanceof Error ? error51.message : String(error51);
@@ -59142,50 +59287,82 @@ var WorkflowRunner = class {
       summary.status = "failed";
       summary.error = message;
       summary.completedAt = nowIso();
+      summary.lastActivityAt = summary.completedAt;
       refreshPhaseCounts(summary);
       await this.store.writeSummary(summary);
       await this.store.appendEvent({ type: "run_failed", runId, at: nowIso(), error: message });
       throw error51;
+    } finally {
+      clearInterval(heartbeatTimer);
     }
   }
   async startPhase(summary, phaseId) {
+    const at = nowIso();
     const next = await this.mutateSummary(summary.id, (current) => {
+      current.lastActivityAt = at;
       current.selectedPhaseId = phaseId;
-      current.phases = current.phases.map((phase) => phase.id === phaseId ? { ...phase, status: "running", startedAt: nowIso() } : phase);
+      current.phases = current.phases.map((phase) => phase.id === phaseId ? { ...phase, status: "running", startedAt: at } : phase);
     });
     await this.store.appendEvent({
       type: "phase_started",
       runId: next.id,
       phaseId,
-      at: nowIso()
+      at
     });
     return next;
   }
   async completePhase(summary, phaseId) {
+    const at = nowIso();
     const next = await this.mutateSummary(summary.id, (current) => {
+      current.lastActivityAt = at;
       const failed = current.agents.some((agent) => agent.phaseId === phaseId && agent.status === "failed");
       current.phases = current.phases.map((phase) => phase.id === phaseId ? {
         ...phase,
         status: failed ? "failed" : "completed",
-        completedAt: nowIso()
+        completedAt: at
       } : phase);
     });
     await this.store.appendEvent({
       type: "phase_completed",
       runId: next.id,
       phaseId,
-      at: nowIso()
+      at
     });
     return next;
   }
-  async runAgent(summary, definition, phaseId, agentDefinition, adapter, options) {
+  async runAgent(summary, definition, phaseId, agentDefinition, agentIndex, phaseAgentCount, adapter, options) {
     await this.throwIfStopped(summary.id);
     await this.waitIfPaused(summary);
     const agentId = `${phaseId}:${agentDefinition.id}`;
     const startedAt = nowIso();
+    const model = resolveAgentModel2(phaseId, agentDefinition, options);
+    const contextSummary = await this.store.readSummary(summary.id);
+    const contextFindings = collectContextFindings(contextSummary, agentDefinition, agentIndex, phaseAgentCount);
+    const workerSpec = {
+      id: agentId,
+      phaseId,
+      title: agentDefinition.title,
+      prompt: buildWorkerPrompt(definition, phaseId, agentDefinition, options.args ?? {}, options, contextFindings),
+      cwd: contextSummary.cwd,
+      model,
+      reasoningEffort: agentDefinition.reasoningEffort ?? options.reasoningEffort,
+      sandbox: agentDefinition.sandbox,
+      expectedTokens: agentDefinition.expectedTokens,
+      expectedTools: agentDefinition.expectedTools,
+      durationMs: agentDefinition.durationMs
+    };
     let next = await this.mutateSummary(summary.id, (current) => {
-      current.agents = current.agents.map((agent) => agent.id === agentId ? { ...agent, status: "running", startedAt } : agent);
+      current.lastActivityAt = startedAt;
+      current.agents = current.agents.map((agent) => agent.id === agentId ? {
+        ...agent,
+        prompt: workerSpec.prompt,
+        status: "running",
+        startedAt,
+        lastActivityAt: startedAt,
+        lastMessage: "started"
+      } : agent);
     });
+    await this.store.writeAgentPrompt(next.id, agentId, workerSpec.prompt);
     await this.store.appendEvent({
       type: "agent_started",
       runId: next.id,
@@ -59204,26 +59381,13 @@ var WorkflowRunner = class {
         }
         if (control?.type === "stop-agent" && control.agentId === agentId) {
           cancelledByStopAgent = true;
+          await this.store.clearControl(summary.id);
           abortController.abort();
         }
       })();
     }, 250);
     let selectedAdapter = adapter.name === "auto" ? "" : adapter.name;
     try {
-      const model = resolveAgentModel2(phaseId, agentDefinition, options);
-      const workerSpec = {
-        id: agentId,
-        phaseId,
-        title: agentDefinition.title,
-        prompt: buildWorkerPrompt(definition, phaseId, agentDefinition, options.args ?? {}, options),
-        cwd: next.cwd,
-        model,
-        reasoningEffort: agentDefinition.reasoningEffort ?? options.reasoningEffort,
-        sandbox: agentDefinition.sandbox,
-        expectedTokens: agentDefinition.expectedTokens,
-        expectedTools: agentDefinition.expectedTools,
-        durationMs: agentDefinition.durationMs
-      };
       let result;
       let findings;
       let validationError = "";
@@ -59235,19 +59399,22 @@ var WorkflowRunner = class {
 Previous output was invalid: ${validationError}
 Return valid JSON text only.`
         }, async (progress) => {
+          const at = nowIso();
           if (progress.actualAdapter && progress.actualAdapter !== selectedAdapter) {
             selectedAdapter = progress.actualAdapter;
             await this.store.appendEvent({
               type: "adapter_selected",
               runId: summary.id,
               agentId,
-              at: nowIso(),
+              at,
               requestedAdapter: adapter.name === "auto" || adapter.name === "simulate" || adapter.name === "exec" || adapter.name === "sdk" ? adapter.name : "auto",
               actualAdapter: progress.actualAdapter,
               fallbackReason: progress.fallbackReason
             });
           }
           const current = await this.mutateSummary(summary.id, (draft) => {
+            draft.heartbeatAt = at;
+            draft.lastActivityAt = at;
             if (progress.actualAdapter) {
               draft.actualAdapter = progress.actualAdapter;
             }
@@ -59256,6 +59423,8 @@ Return valid JSON text only.`
               tokens: progress.tokens ?? agent.tokens,
               tools: progress.tools ?? agent.tools,
               actualAdapter: progress.actualAdapter ?? agent.actualAdapter,
+              lastActivityAt: at,
+              lastMessage: progress.message ?? (progress.tokens !== void 0 ? "token usage updated" : progress.tools !== void 0 ? "tool usage updated" : agent.lastMessage),
               attempts: attempt
             } : agent);
           });
@@ -59263,7 +59432,7 @@ Return valid JSON text only.`
             type: "agent_updated",
             runId: current.id,
             agentId,
-            at: nowIso(),
+            at,
             tokens: progress.tokens,
             tools: progress.tools,
             message: progress.message
@@ -59273,7 +59442,7 @@ Return valid JSON text only.`
               type: "agent_tool_event",
               runId: current.id,
               agentId,
-              at: nowIso(),
+              at,
               kind: "message",
               text: progress.message
             });
@@ -59281,12 +59450,13 @@ Return valid JSON text only.`
         }, abortController.signal);
         lastRawOutput = result.output;
         if (result.actualAdapter && result.actualAdapter !== selectedAdapter) {
+          const at = nowIso();
           selectedAdapter = result.actualAdapter;
           await this.store.appendEvent({
             type: "adapter_selected",
             runId: next.id,
             agentId,
-            at: nowIso(),
+            at,
             requestedAdapter: adapter.name === "auto" || adapter.name === "simulate" || adapter.name === "exec" || adapter.name === "sdk" ? adapter.name : "auto",
             actualAdapter: result.actualAdapter,
             fallbackReason: result.fallbackReason
@@ -59311,7 +59481,10 @@ Return valid JSON text only.`
         throw new Error(`Worker result validation failed after retry: ${validationError}`);
       }
       let completedAgent;
+      const completedAt = nowIso();
       next = await this.mutateSummary(summary.id, (current) => {
+        current.heartbeatAt = completedAt;
+        current.lastActivityAt = completedAt;
         if (result.actualAdapter ?? selectedAdapter) {
           current.actualAdapter = result.actualAdapter ?? selectedAdapter;
         }
@@ -59329,7 +59502,9 @@ Return valid JSON text only.`
             result: result.output,
             rawResult: result.output,
             findings,
-            completedAt: nowIso()
+            completedAt,
+            lastActivityAt: completedAt,
+            lastMessage: "completed"
           };
           return completedAgent;
         });
@@ -59342,7 +59517,7 @@ Return valid JSON text only.`
         runId: next.id,
         phaseId,
         agentId,
-        at: nowIso(),
+        at: completedAt,
         tokens: result.tokens,
         tools: result.tools,
         elapsedMs: result.elapsedMs
@@ -59356,7 +59531,10 @@ Return valid JSON text only.`
         }
       }
       const message = error51 instanceof Error ? error51.message : String(error51);
+      const completedAt = nowIso();
       next = await this.mutateSummary(summary.id, (current) => {
+        current.heartbeatAt = completedAt;
+        current.lastActivityAt = completedAt;
         if (selectedAdapter) {
           current.actualAdapter = selectedAdapter;
         }
@@ -59366,7 +59544,9 @@ Return valid JSON text only.`
           error: cancelledByStopAgent ? void 0 : message,
           actualAdapter: selectedAdapter || agent.actualAdapter,
           rawResult: lastRawOutput || agent.rawResult,
-          completedAt: nowIso()
+          completedAt,
+          lastActivityAt: completedAt,
+          lastMessage: cancelledByStopAgent ? "cancelled" : message
         } : agent);
       });
       await this.store.appendEvent(cancelledByStopAgent ? {
@@ -59374,13 +59554,13 @@ Return valid JSON text only.`
         runId: next.id,
         phaseId,
         agentId,
-        at: nowIso()
+        at: completedAt
       } : {
         type: "agent_failed",
         runId: next.id,
         phaseId,
         agentId,
-        at: nowIso(),
+        at: completedAt,
         error: message
       });
     } finally {
@@ -59390,8 +59570,11 @@ Return valid JSON text only.`
   async completeRun(summary) {
     const next = await this.store.readSummary(summary.id);
     refreshPhaseCounts(next);
+    const completedAt = nowIso();
     next.status = next.totals.failedAgents > 0 ? "failed" : "completed";
-    next.completedAt = nowIso();
+    next.completedAt = completedAt;
+    next.heartbeatAt = completedAt;
+    next.lastActivityAt = completedAt;
     const markdown = this.buildFinalReport(next);
     const finalReportPath = await this.store.writeFinalReport(next.id, markdown);
     next.finalReportPath = finalReportPath;
@@ -59492,11 +59675,23 @@ Return valid JSON text only.`
         throw new WorkflowStoppedError();
       }
     }
+    if (control?.type === "resume") {
+      await this.store.clearControl(summary.id);
+    }
     next = await this.store.readSummary(summary.id);
     next.status = "running";
     refreshPhaseCounts(next);
     await this.store.writeSummary(next);
     await this.store.appendEvent({ type: "run_resumed", runId: summary.id, at: nowIso() });
+  }
+  async touchRun(runId) {
+    await this.mutateSummary(runId, (summary) => {
+      if (summary.status !== "running" && summary.status !== "paused") {
+        return;
+      }
+      summary.runnerPid = process.pid;
+      summary.heartbeatAt = nowIso();
+    }).catch(() => void 0);
   }
   async mutateSummary(runId, mutate) {
     const task = this.summaryLock.then(async () => {
@@ -59586,6 +59781,14 @@ var phaseColor = (status, active) => {
     return "red";
   }
   return "gray";
+};
+var effectiveAgentElapsed = (agent) => agent.status === "running" && agent.startedAt ? Math.max(0, Date.now() - new Date(agent.startedAt).getTime()) : agent.elapsedMs;
+var formatAgentTokens = (agent) => agent.status === "running" && agent.tokens === 0 ? "tok pending" : `${formatCount(agent.tokens)} tok`;
+var formatActivity = (at) => {
+  if (!at) {
+    return "no activity";
+  }
+  return `idle ${formatDuration(Math.max(0, Date.now() - new Date(at).getTime()))}`;
 };
 function DashboardFrame({
   summary,
@@ -59694,12 +59897,12 @@ function DashboardFrame({
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Text, { color: "gray", children: [
-            formatCount(agent.tokens),
-            " tok \xB7 ",
+            formatAgentTokens(agent),
+            " \xB7 ",
             agent.tools,
             " tools \xB7",
             " ",
-            formatDuration(agent.elapsedMs)
+            formatDuration(effectiveAgentElapsed(agent))
           ] })
         ] }, agent.id)),
         phaseAgents.length > listAgents.length ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Text, { color: "gray", children: [
@@ -59726,7 +59929,18 @@ function DashboardFrame({
           selectedAgent.reasoningEffort ? `:${selectedAgent.reasoningEffort}` : ""
         ] })
       ] }),
-      detailLines && detailLines.length > 0 ? detailLines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(line, width - 4) }, line)) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: selectedAgent.status === "running" ? "Agent is running. Live token/tool metrics update above." : truncateMiddle(selectedAgent.error ?? selectedAgent.prompt, width - 4) })
+      detailLines && detailLines.length > 0 ? detailLines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(line, width - 4) }, line)) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: selectedAgent.status === "running" ? truncateMiddle(
+          `Agent is running. ${formatActivity(
+            selectedAgent.lastActivityAt ?? selectedAgent.startedAt
+          )}. ${selectedAgent.lastMessage ?? "Waiting for worker events."}`,
+          width - 4
+        ) : truncateMiddle(selectedAgent.error ?? selectedAgent.prompt, width - 4) }),
+        selectedAgent.lastActivityAt && selectedAgent.status !== "running" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(
+          `Last activity: ${selectedAgent.lastActivityAt}${selectedAgent.lastMessage ? ` \xB7 ${selectedAgent.lastMessage}` : ""}`,
+          width - 4
+        ) }) : null
+      ] })
     ] }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", italic: true, children: "\u2191\u2193 select \xB7 \u2190\u2192 phase \xB7 j/k scroll \xB7 r restart agent \xB7 x stop \xB7 p pause/resume \xB7 s save \xB7 q quit" })
   ] });
@@ -59923,7 +60137,7 @@ var storeFor = (cwd2, storageScope = "codex-home", storeRoot) => new RunStore(cw
   storageScope,
   storeRoot: storeRoot ?? defaultStoreRoot(cwd2, storageScope)
 });
-program2.name("cwf").description("Codex workflow-as-code runtime").version("0.1.0");
+program2.name("cwf").description("Codex workflow-as-code runtime").version("0.2.0");
 program2.command("__run-worker", { hidden: true }).argument("<launch>", "base64url encoded workflow launch").action(async (launch) => {
   const options = decodeLaunch(launch);
   await runWorkflow(options);
@@ -59980,6 +60194,7 @@ program2.command("workflows").description("list built-in and saved workflows").o
   const runs = await store.listRuns();
   console.log("Built-in workflows:");
   console.log("  workflows/bug-sweep.workflow.js");
+  console.log("  workflows/bug-sweep-deep.workflow.js");
   console.log("  workflows/release-diff-review.workflow.js");
   console.log("  workflows/security-auth-review.workflow.js");
   console.log("");
@@ -60029,6 +60244,7 @@ program2.command("restart-agent").argument("<run-id>").argument("<agent-id>").op
   const cwd2 = path5.resolve(options.cwd);
   const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd2, options.storageScope);
   const store = storeFor(cwd2, options.storageScope, storeRoot);
+  await store.clearControl(runId);
   const summary = await store.markAgentForRestart(runId, agentId);
   const manifest = await store.readManifest(runId);
   await runWorkflow({
@@ -60045,7 +60261,6 @@ program2.command("restart-agent").argument("<run-id>").argument("<agent-id>").op
     storeRoot,
     resume: true
   });
-  await store.writeControl(runId, { type: "restart-agent", at: nowIso(), agentId });
   console.log(`restarted ${agentId} in ${runId}`);
 });
 program2.command("save").argument("<run-id>").requiredOption("--name <name>", "saved workflow name").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (runId, options) => {

@@ -45,10 +45,13 @@ const fixture: RunSummary = {
       model: "Codex",
       sandbox: "read-only",
       status: "running",
-      tokens: 138500,
+      tokens: 0,
       tools: 95,
       elapsedMs: 554000,
-      attempts: 1
+      attempts: 1,
+      startedAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      lastActivityAt: new Date(Date.now() - 15 * 1000).toISOString(),
+      lastMessage: "command_execution"
     }
   ],
   totals: {
@@ -69,5 +72,19 @@ describe("DashboardFrame", () => {
     expect(lastFrame()).toContain("Find");
     expect(lastFrame()).toContain("find:reflow-engine");
     expect(lastFrame()).toContain("tok");
+  });
+
+  it("shows pending token metrics and activity for running agents", () => {
+    const { lastFrame } = render(
+      <DashboardFrame
+        summary={fixture}
+        width={88}
+        selectedPhaseId="find"
+        selectedAgentId="find:concurrency"
+      />
+    );
+    expect(lastFrame()).toContain("tok pending");
+    expect(lastFrame()).toContain("idle");
+    expect(lastFrame()).toContain("command_execution");
   });
 });

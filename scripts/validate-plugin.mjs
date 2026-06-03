@@ -52,6 +52,7 @@ await Promise.all([
   assertFile(path.join(pluginRoot, "dist", "emscripten-module.wasm")),
   assertFile(path.join(pluginRoot, "skills", "codex-workflows", "SKILL.md")),
   assertFile(path.join(pluginRoot, "workflows", "bug-sweep.workflow.js")),
+  assertFile(path.join(pluginRoot, "workflows", "bug-sweep-deep.workflow.js")),
   assertFile(path.join(pluginRoot, "workflows", "release-diff-review.workflow.js")),
   assertFile(path.join(pluginRoot, "workflows", "security-auth-review.workflow.js"))
 ]);

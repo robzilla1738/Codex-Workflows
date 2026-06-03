@@ -28,6 +28,14 @@ const elapsed = (startedAt?: string) =>
   startedAt ? Math.max(0, Date.now() - new Date(startedAt).getTime()) : 0;
 
 const refreshSummaryCounts = (summary: RunSummary) => {
+  summary.agents = summary.agents.map((agent) =>
+    agent.status === "running" && agent.startedAt
+      ? {
+          ...agent,
+          elapsedMs: elapsed(agent.startedAt)
+        }
+      : agent
+  );
   summary.phases = summary.phases.map((phase) => {
     const agents = summary.agents.filter((agent) => agent.phaseId === phase.id);
     return {
@@ -50,6 +58,7 @@ const refreshSummaryCounts = (summary: RunSummary) => {
 export interface RunStoreOptions {
   storageScope?: StorageScope;
   storeRoot?: string;
+  staleHeartbeatMs?: number;
 }
 
 const projectStoreRoot = (cwd: string) => path.join(cwd, ".codex-workflows");
@@ -66,15 +75,35 @@ export const defaultStoreRoot = (cwd: string, storageScope: StorageScope = "code
 
 const dirExists = (candidate: string) => existsSync(candidate);
 
+const defaultStaleHeartbeatMs = () => {
+  const raw = process.env.CODEX_WORKFLOWS_STALE_HEARTBEAT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
+};
+
+const processIsAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const cloneSummary = (summary: RunSummary): RunSummary =>
+  RunSummarySchema.parse(JSON.parse(JSON.stringify(summary)));
+
 export class RunStore {
   readonly root: string;
   readonly storageScope: StorageScope;
   private readonly projectRoot: string;
+  private readonly staleHeartbeatMs: number;
 
   constructor(readonly cwd: string, options: RunStoreOptions = {}) {
     this.storageScope = options.storageScope ?? "codex-home";
     this.projectRoot = projectStoreRoot(cwd);
     this.root = options.storeRoot ?? defaultStoreRoot(cwd, this.storageScope);
+    this.staleHeartbeatMs = options.staleHeartbeatMs ?? defaultStaleHeartbeatMs();
   }
 
   runDir(runId: string) {
@@ -185,13 +214,66 @@ export class RunStore {
     let lastError: unknown;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        return RunSummarySchema.parse(JSON.parse(await readFile(this.statusPath(runId), "utf8")));
+        const parsed = RunSummarySchema.parse(
+          JSON.parse(await readFile(this.statusPath(runId), "utf8"))
+        );
+        return await this.reconcileSummary(parsed);
       } catch (error) {
         lastError = error;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
     }
     throw lastError;
+  }
+
+  private async reconcileSummary(summary: RunSummary) {
+    const next = cloneSummary(summary);
+    refreshSummaryCounts(next);
+    if (next.status !== "running" && next.status !== "paused") {
+      return next;
+    }
+    if (!next.runnerPid || processIsAlive(next.runnerPid)) {
+      return next;
+    }
+    const heartbeatAt = next.heartbeatAt ?? next.lastActivityAt;
+    if (!heartbeatAt) {
+      return next;
+    }
+    const staleForMs = Date.now() - new Date(heartbeatAt).getTime();
+    if (staleForMs < this.staleHeartbeatMs) {
+      return next;
+    }
+    const at = nowIso();
+    const error = `Workflow runner process ${next.runnerPid} is not running and heartbeat is stale since ${heartbeatAt}.`;
+    next.status = "failed";
+    next.error = error;
+    next.completedAt = at;
+    next.lastActivityAt = at;
+    next.agents = next.agents.map((agent) =>
+      agent.status === "running"
+        ? {
+            ...agent,
+            status: "failed",
+            error,
+            completedAt: at,
+            lastActivityAt: at,
+            lastMessage: "runner orphaned"
+          }
+        : agent
+    );
+    next.phases = next.phases.map((phase) =>
+      phase.status === "running" || phase.status === "paused"
+        ? {
+            ...phase,
+            status: "failed",
+            completedAt: at
+          }
+        : phase
+    );
+    refreshSummaryCounts(next);
+    await this.writeSummary(next);
+    await this.appendEvent({ type: "run_failed", runId: next.id, at, error }).catch(() => undefined);
+    return next;
   }
 
   async appendEvent(event: WorkflowEvent) {
@@ -257,6 +339,12 @@ export class RunStore {
     await writeFile(path.join(dir, "result.json"), `${JSON.stringify(agent, null, 2)}\n`);
   }
 
+  async writeAgentPrompt(runId: string, agentId: string, prompt: string) {
+    const dir = this.agentDir(runId, agentId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "prompt.md"), `${prompt}\n`);
+  }
+
   async writeFinalReport(runId: string, markdown: string) {
     const finalReportPath = path.join(this.runDir(runId), "final.md");
     await writeFile(finalReportPath, markdown);
@@ -282,6 +370,12 @@ export class RunStore {
             rawResult: undefined,
             findings: undefined,
             completedAt: undefined,
+            startedAt: undefined,
+            lastActivityAt: undefined,
+            lastMessage: undefined,
+            tokens: 0,
+            tools: 0,
+            elapsedMs: 0,
             attempts: 0
           }
         : item

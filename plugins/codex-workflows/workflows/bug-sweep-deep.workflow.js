@@ -9,21 +9,21 @@ const probeContext = {
   phaseIds: ["verify"],
   verdicts: ["confirmed", "needs-human-review"],
   mode: "all",
-  maxFindings: 12
+  maxFindings: 48
 };
 
 const synthesizeContext = {
   phaseIds: ["verify", "probe"],
   verdicts: ["confirmed", "needs-human-review"],
   mode: "all",
-  maxFindings: 20
+  maxFindings: 64
 };
 
 export default workflow({
-  name: "bug-sweep",
-  version: "2",
+  name: "bug-sweep-deep",
+  version: "1",
   description:
-    "Bounded codebase-wide bug sweep with independent finding, verification, repro planning, and synthesis.",
+    "Deep codebase-wide adversarial bug sweep with broad finding, verification, repro planning, and synthesis.",
   maxConcurrency: 64,
   maxAgents: 2000,
   phases: [
@@ -47,20 +47,32 @@ export default workflow({
           id: "public-interfaces",
           title: "public-interfaces",
           prompt:
-            "Audit public interfaces such as CLI, API, plugin, config, and integration surfaces for broken flags, invalid defaults, missing validation, and control bugs. Return strict JSON findings only."
+            "Audit CLI, API, plugin, config, and integration surfaces for broken flags, invalid defaults, missing validation, and workflow control bugs. Return strict JSON findings only."
         },
         {
           id: "user-facing-flows",
           title: "user-facing-flows",
           prompt:
-            "Audit user-facing flows for broken navigation, unreadable states, overflow, stale status, missing feedback, and workflow mismatches. Return strict JSON findings only."
+            "Audit user-facing flows for broken navigation, unreadable states, overflow, stale status, missing feedback, and control mismatches. Return strict JSON findings only."
+        },
+        {
+          id: "integration-boundaries",
+          title: "integration-boundaries",
+          prompt:
+            "Audit external integrations, subprocess boundaries, network calls, generated artifacts, and cross-component assumptions for subtle failures. Return strict JSON findings only."
+        },
+        {
+          id: "persistence-recovery",
+          title: "persistence-recovery",
+          prompt:
+            "Audit persistence, checkpointing, resume/retry, restart, recovery, and artifact durability paths. Return strict JSON findings only."
         }
       ]
     },
     {
       id: "verify",
       title: "Verify",
-      agents: Array.from({ length: 4 }, (_, index) => ({
+      agents: Array.from({ length: 24 }, (_, index) => ({
         id: `claim-${String(index + 1).padStart(2, "0")}`,
         title: `claim-${String(index + 1).padStart(2, "0")}`,
         prompt:
@@ -73,10 +85,17 @@ export default workflow({
       title: "Probe",
       agents: [
         {
-          id: "repro-and-tests",
-          title: "repro-and-tests",
+          id: "minimal-repros",
+          title: "minimal-repros",
           prompt:
-            "For confirmed or plausible bugs, design minimal repro commands or manual steps and map them to exact regression test acceptance criteria. Return strict JSON findings only.",
+            "For confirmed or plausible bugs, design minimal repro commands or manual steps. Mark anything unproven as needs-human-review. Return strict JSON findings only.",
+          contextFrom: probeContext
+        },
+        {
+          id: "regression-tests",
+          title: "regression-tests",
+          prompt:
+            "Map confirmed or plausible bugs to exact regression test files, test names, and acceptance criteria. Return strict JSON findings only.",
           contextFrom: probeContext
         }
       ]
