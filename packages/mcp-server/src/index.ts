@@ -10,11 +10,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   createRunId,
+  defaultStoreRoot,
   loadWorkflowDefinition,
+  ModelValidationError,
   nowIso,
   RunStore,
-  validateWorkflowDefinition
+  validateWorkflowDefinition,
+  validateWorkflowModels
 } from "@codex-workflows/runtime";
+import type { StorageScope } from "@codex-workflows/schemas";
 
 const cwdSchema = z.string().optional();
 
@@ -67,9 +71,14 @@ const resolveWorkflowPath = (projectRoot: string, workflowPath: string) => {
   ]);
 };
 
-const dashboardCommand = (root: string, runId: string) => {
+const dashboardCommand = (
+  root: string,
+  runId: string,
+  storageScope?: StorageScope,
+  storeRoot?: string
+) => {
   const cliPath = cliPathFor(root);
-  return [
+  const command = [
     "cd",
     quoteShell(root),
     "&&",
@@ -79,7 +88,14 @@ const dashboardCommand = (root: string, runId: string) => {
     quoteShell(runId),
     "--cwd",
     quoteShell(root)
-  ].join(" ");
+  ];
+  if (storageScope) {
+    command.push("--storage-scope", quoteShell(storageScope));
+  }
+  if (storeRoot) {
+    command.push("--store-root", quoteShell(storeRoot));
+  }
+  return command.join(" ");
 };
 
 const encodeLaunch = (payload: unknown) =>
@@ -99,6 +115,8 @@ const startWorkflowWorker = (
     promptSuffix?: string;
     approval?: "once" | "always" | "deny";
     resume?: boolean;
+    storageScope?: StorageScope;
+    storeRoot?: string;
   }
 ) => {
   const child = spawn(process.execPath, [cliPathFor(root), "__run-worker", encodeLaunch(launch)], {
@@ -129,9 +147,10 @@ const writeDashboardCommand = async (
   root: string,
   runId: string,
   columns: number,
-  rows: number
+  rows: number,
+  store: RunStore
 ) => {
-  const scriptPath = path.resolve(root, ".codex-workflows", "runs", runId, "watch.command");
+  const scriptPath = path.join(store.runDir(runId), "watch.command");
   await mkdir(path.dirname(scriptPath), { recursive: true });
   await writeFile(
     scriptPath,
@@ -141,7 +160,9 @@ const writeDashboardCommand = async (
       `cd ${quoteShell(root)} || exit 1`,
       `exec ${quoteShell(process.execPath)} ${quoteShell(cliPathFor(root))} watch ${quoteShell(
         runId
-      )} --cwd ${quoteShell(root)}`,
+      )} --cwd ${quoteShell(root)} --storage-scope ${quoteShell(
+        store.storageScope
+      )} --store-root ${quoteShell(store.root)}`,
       ""
     ].join("\n")
   );
@@ -154,11 +175,12 @@ const openCommandFile = async (
   runId: string,
   columns: number,
   rows: number,
+  store: RunStore,
   app: "SystemDefault" | "Harness",
   openArgs: string[]
 ): Promise<TerminalOpenResult> => {
-  const command = dashboardCommand(root, runId);
-  const scriptPath = await writeDashboardCommand(root, runId, columns, rows);
+  const command = dashboardCommand(root, runId, store.storageScope, store.root);
+  const scriptPath = await writeDashboardCommand(root, runId, columns, rows, store);
   return new Promise((resolve) => {
     const child = spawn("open", [...openArgs, scriptPath], {
       stdio: ["ignore", "ignore", "pipe"],
@@ -199,23 +221,26 @@ const openDefaultDashboard = (
   root: string,
   runId: string,
   columns: number,
-  rows: number
-) => openCommandFile(root, runId, columns, rows, "SystemDefault", []);
+  rows: number,
+  store: RunStore
+) => openCommandFile(root, runId, columns, rows, store, "SystemDefault", []);
 
 const openHarnessDashboard = (
   root: string,
   runId: string,
   columns: number,
-  rows: number
-) => openCommandFile(root, runId, columns, rows, "Harness", ["-b", "com.robert.harness"]);
+  rows: number,
+  store: RunStore
+) => openCommandFile(root, runId, columns, rows, store, "Harness", ["-b", "com.robert.harness"]);
 
 const openMacTerminalDashboard = async (
   root: string,
   runId: string,
   columns: number,
-  rows: number
+  rows: number,
+  store?: RunStore
 ): Promise<TerminalOpenResult> => {
-  const command = dashboardCommand(root, runId);
+  const command = dashboardCommand(root, runId, store?.storageScope, store?.root);
   if (process.platform !== "darwin") {
     return {
       opened: false,
@@ -278,22 +303,23 @@ const openDashboard = async (
   runId: string,
   columns: number,
   rows: number,
-  terminalApp: "default" | "auto" | "harness" | "terminal"
+  terminalApp: "default" | "auto" | "harness" | "terminal",
+  store: RunStore
 ) => {
   if (process.platform !== "darwin") {
-    return openMacTerminalDashboard(root, runId, columns, rows);
+    return openMacTerminalDashboard(root, runId, columns, rows, store);
   }
   if (terminalApp === "default" || terminalApp === "auto") {
-    const opened = await openDefaultDashboard(root, runId, columns, rows);
+    const opened = await openDefaultDashboard(root, runId, columns, rows, store);
     if (opened.opened) {
       return opened;
     }
-    return openMacTerminalDashboard(root, runId, columns, rows);
+    return openMacTerminalDashboard(root, runId, columns, rows, store);
   }
   if (terminalApp === "harness") {
-    return openHarnessDashboard(root, runId, columns, rows);
+    return openHarnessDashboard(root, runId, columns, rows, store);
   }
-  return openMacTerminalDashboard(root, runId, columns, rows);
+  return openMacTerminalDashboard(root, runId, columns, rows, store);
 };
 
 const text = (payload: unknown) => ({
@@ -304,6 +330,14 @@ const text = (payload: unknown) => ({
     }
   ]
 });
+
+const storageScopeSchema = z.enum(["codex-home", "project"]).default("codex-home");
+
+const storeFor = (root: string, storageScope: StorageScope = "codex-home", storeRoot?: string) =>
+  new RunStore(root, {
+    storageScope,
+    storeRoot: storeRoot ?? defaultStoreRoot(root, storageScope)
+  });
 
 const server = new McpServer(
   {
@@ -324,12 +358,14 @@ server.registerTool(
     inputSchema: {
       workflowPath: z.string().default("workflows/release-diff-review.workflow.js"),
       args: z.unknown().optional(),
-      adapter: z.enum(["simulate", "exec", "sdk"]).default("simulate"),
+      adapter: z.enum(["auto", "simulate", "exec", "sdk"]).default("auto"),
       model: z.string().optional(),
       reasoning: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
       modelMap: z.record(z.string(), z.string()).optional(),
       promptSuffix: z.string().optional(),
       approval: z.enum(["once", "always", "deny"]).default("once"),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       openTui: z.boolean().default(true),
       terminalApp: z.enum(["default", "auto", "harness", "terminal"]).default("default"),
       terminalColumns: z.number().int().min(100).max(300).default(190),
@@ -346,6 +382,8 @@ server.registerTool(
     modelMap,
     promptSuffix,
     approval,
+    storageScope,
+    storeRoot,
     openTui,
     terminalApp,
     terminalColumns,
@@ -358,12 +396,32 @@ server.registerTool(
     if (approval === "deny") {
       return text({
         cancelled: true,
-        reason: "Workflow launch denied by approval=deny.",
+        reason:
+          "Workflow launch denied by approval=deny. For read-only review, omit approval and rely on the workflow sandbox.",
         workflowPath: absoluteWorkflowPath
       });
     }
+    try {
+      await validateWorkflowModels(loaded.definition, {
+        adapter,
+        defaultModel: model,
+        modelMap
+      });
+    } catch (error) {
+      if (error instanceof ModelValidationError) {
+        return text({
+          ok: false,
+          error: error.message,
+          issues: error.issues,
+          validModels: error.validModels,
+          workflowPath: absoluteWorkflowPath
+        });
+      }
+      throw error;
+    }
     const runId = createRunId(loaded.definition.name);
-    const store = new RunStore(root);
+    const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(root, storageScope);
+    const store = storeFor(root, storageScope, resolvedStoreRoot);
     if (approval === "always") {
       await store.trustWorkflow(loaded.definition.name, absoluteWorkflowPath, loaded.hash);
     }
@@ -377,16 +435,16 @@ server.registerTool(
       modelMap,
       promptSuffix,
       approval,
-      runId
+      runId,
+      storageScope,
+      storeRoot: resolvedStoreRoot
     });
     await waitForRunInitialized(store, runId);
     const dashboard = openTui
-      ? await openDashboard(root, runId, terminalColumns, terminalRows, terminalApp)
+      ? await openDashboard(root, runId, terminalColumns, terminalRows, terminalApp, store)
       : {
           opened: false,
-          command: `${quoteShell(process.execPath)} ${quoteShell(
-            cliPathFor(root)
-          )} watch ${quoteShell(runId)} --cwd ${quoteShell(root)}`,
+          command: dashboardCommand(root, runId, storageScope, resolvedStoreRoot),
           columns: terminalColumns,
           rows: terminalRows,
           app:
@@ -401,6 +459,8 @@ server.registerTool(
       runId,
       cwd: root,
       workflowPath: absoluteWorkflowPath,
+      storageScope,
+      storeRoot: resolvedStoreRoot,
       workerPid,
       dashboard,
       platform: os.platform()
@@ -468,11 +528,13 @@ server.registerTool(
     description: "Read the current run summary.",
     inputSchema: {
       runId: z.string(),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ runId, cwd }) => {
-    const store = new RunStore(path.resolve(cwd ?? process.cwd()));
+  async ({ runId, storageScope, storeRoot, cwd }) => {
+    const store = storeFor(path.resolve(cwd ?? process.cwd()), storageScope, storeRoot);
     return text(await store.readSummary(runId));
   }
 );
@@ -485,11 +547,13 @@ server.registerTool(
     inputSchema: {
       runId: z.string(),
       cursor: z.number().int().nonnegative().default(0),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ runId, cursor, cwd }) => {
-    const store = new RunStore(path.resolve(cwd ?? process.cwd()));
+  async ({ runId, cursor, storageScope, storeRoot, cwd }) => {
+    const store = storeFor(path.resolve(cwd ?? process.cwd()), storageScope, storeRoot);
     return text(await store.readEvents(runId, cursor));
   }
 );
@@ -502,11 +566,13 @@ server.registerTool(
     inputSchema: {
       runId: z.string(),
       agentId: z.string(),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ runId, agentId, cwd }) => {
-    const store = new RunStore(path.resolve(cwd ?? process.cwd()));
+  async ({ runId, agentId, storageScope, storeRoot, cwd }) => {
+    const store = storeFor(path.resolve(cwd ?? process.cwd()), storageScope, storeRoot);
     const summary = await store.readSummary(runId);
     const agent = summary.agents.find((item) => item.id === agentId);
     if (!agent) {
@@ -524,12 +590,15 @@ for (const command of ["pause", "resume", "stop"] as const) {
       description: `Request workflow ${command}.`,
       inputSchema: {
         runId: z.string(),
+        storageScope: storageScopeSchema,
+        storeRoot: z.string().optional(),
         cwd: cwdSchema
       }
     },
-    async ({ runId, cwd }) => {
+    async ({ runId, storageScope, storeRoot, cwd }) => {
       const root = path.resolve(cwd ?? process.cwd());
-      const store = new RunStore(root);
+      const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(root, storageScope);
+      const store = storeFor(root, storageScope, resolvedStoreRoot);
       await store.writeControl(runId, { type: command, at: nowIso() });
       if (command === "resume") {
         const summary = await store.readSummary(runId);
@@ -552,6 +621,8 @@ for (const command of ["pause", "resume", "stop"] as const) {
                 : undefined,
             promptSuffix:
               typeof launch.promptSuffix === "string" ? launch.promptSuffix : undefined,
+            storageScope,
+            storeRoot: resolvedStoreRoot,
             resume: true
           });
           return text({ runId, command, workerPid });
@@ -570,11 +641,13 @@ server.registerTool(
     inputSchema: {
       runId: z.string(),
       agentId: z.string(),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ runId, agentId, cwd }) => {
-    const store = new RunStore(path.resolve(cwd ?? process.cwd()));
+  async ({ runId, agentId, storageScope, storeRoot, cwd }) => {
+    const store = storeFor(path.resolve(cwd ?? process.cwd()), storageScope, storeRoot);
     await store.writeControl(runId, { type: "stop-agent", at: nowIso(), agentId });
     return text({ runId, agentId, command: "stop-agent" });
   }
@@ -588,12 +661,15 @@ server.registerTool(
     inputSchema: {
       runId: z.string(),
       agentId: z.string(),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ runId, agentId, cwd }) => {
+  async ({ runId, agentId, storageScope, storeRoot, cwd }) => {
     const root = path.resolve(cwd ?? process.cwd());
-    const store = new RunStore(root);
+    const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(root, storageScope);
+    const store = storeFor(root, storageScope, resolvedStoreRoot);
     const summary = await store.markAgentForRestart(runId, agentId);
     const manifest = await store.readManifest(runId);
     const launch = manifest.launch ?? {};
@@ -611,6 +687,8 @@ server.registerTool(
           ? (launch.modelMap as Record<string, string>)
           : undefined,
       promptSuffix: typeof launch.promptSuffix === "string" ? launch.promptSuffix : undefined,
+      storageScope,
+      storeRoot: resolvedStoreRoot,
       resume: true
     });
     await store.writeControl(runId, {
@@ -630,11 +708,13 @@ server.registerTool(
     inputSchema: {
       runId: z.string(),
       name: z.string(),
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ runId, name, cwd }) => {
-    const store = new RunStore(path.resolve(cwd ?? process.cwd()));
+  async ({ runId, name, storageScope, storeRoot, cwd }) => {
+    const store = storeFor(path.resolve(cwd ?? process.cwd()), storageScope, storeRoot);
     return text(await store.saveRunAsWorkflow(runId, name));
   }
 );
@@ -645,11 +725,13 @@ server.registerTool(
     title: "List workflows",
     description: "List recent workflow runs.",
     inputSchema: {
+      storageScope: storageScopeSchema,
+      storeRoot: z.string().optional(),
       cwd: cwdSchema
     }
   },
-  async ({ cwd }) => {
-    const store = new RunStore(path.resolve(cwd ?? process.cwd()));
+  async ({ storageScope, storeRoot, cwd }) => {
+    const store = storeFor(path.resolve(cwd ?? process.cwd()), storageScope, storeRoot);
     return text(await store.listRuns());
   }
 );

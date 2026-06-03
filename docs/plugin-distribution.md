@@ -33,7 +33,7 @@ codex plugin add codex-workflows@codex-workflows
 After installing, start a new Codex thread and ask:
 
 ```text
-Use codex-workflows to run the bug-sweep workflow with adapter sdk.
+Use codex-workflows to run the bug-sweep workflow with adapter auto.
 Open the live dashboard automatically and tell me the run id.
 ```
 
@@ -77,7 +77,8 @@ reload plugin skills and MCP tools.
    ```
 
 5. Smoke the generated MCP server from `plugins/codex-workflows`.
-6. Run at least one real `adapter: sdk` workflow before tagging a release.
+6. Run at least one real `adapter: auto` workflow before tagging a release and
+   confirm the actual adapter is recorded in the run status.
 7. Tag and push:
 
    ```bash

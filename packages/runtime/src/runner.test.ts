@@ -1,16 +1,35 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runWorkflow } from "./runner.js";
 import { RunStore } from "./store.js";
 import { validateWorkflowDefinition } from "./definition.js";
 import type { WorkerAdapter } from "@codex-workflows/codex-adapter";
 
 const tmpRoots: string[] = [];
+const originalCodexHome = process.env.CODEX_HOME;
+const originalModelCatalog = process.env.CODEX_WORKFLOWS_MODEL_CATALOG;
 
 describe("runWorkflow", () => {
+  beforeEach(async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "cwf-home-"));
+    tmpRoots.push(home);
+    process.env.CODEX_HOME = home;
+  });
+
   afterEach(async () => {
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
+    }
+    if (originalModelCatalog === undefined) {
+      delete process.env.CODEX_WORKFLOWS_MODEL_CATALOG;
+    } else {
+      process.env.CODEX_WORKFLOWS_MODEL_CATALOG = originalModelCatalog;
+    }
     await Promise.all(tmpRoots.map((root) => rm(root, { recursive: true, force: true })));
     tmpRoots.length = 0;
   });
@@ -235,5 +254,33 @@ describe("runWorkflow", () => {
     const result = await validateWorkflowDefinition(workflowPath);
     expect(result.ok).toBe(false);
     expect(result.errors[0]).toContain("maxAgents");
+  });
+
+  it("rejects invalid real adapter model names before initializing a run", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "cwf-runner-"));
+    tmpRoots.push(cwd);
+    process.env.CODEX_WORKFLOWS_MODEL_CATALOG = JSON.stringify({
+      models: [{ slug: "gpt-5.4-mini" }, { slug: "gpt-5.5" }]
+    });
+    const workflowPath = path.join(cwd, "models.workflow.js");
+    await writeFile(
+      workflowPath,
+      `export default workflow({
+        name:"invalid-model",
+        description:"Invalid model",
+        phases:[{id:"find",title:"Find",agents:[{id:"a",title:"a",prompt:"A"}]}]
+      });`
+    );
+
+    await expect(
+      runWorkflow({
+        cwd,
+        workflowPath,
+        adapter: "exec",
+        defaultModel: "5.4-mini",
+        runId: "run-invalid-model"
+      })
+    ).rejects.toThrow("Did you mean gpt-5.4-mini?");
+    expect(existsSync(path.join(process.env.CODEX_HOME ?? "", "codex-workflows"))).toBe(false);
   });
 });

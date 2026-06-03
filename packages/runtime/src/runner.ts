@@ -9,11 +9,13 @@ import {
   type PhaseSummary,
   type ReasoningEffort,
   type RunSummary,
+  type StorageScope,
   type WorkflowDefinition
 } from "@codex-workflows/schemas";
 import { createRunId, nowIso, resolveWorkflowPath } from "./ids.js";
 import { loadWorkflowDefinition } from "./definition.js";
 import { RunStore } from "./store.js";
+import { validateWorkflowModels } from "./models.js";
 
 export interface RunWorkflowOptions {
   cwd: string;
@@ -26,6 +28,8 @@ export interface RunWorkflowOptions {
   modelMap?: Record<string, string>;
   promptSuffix?: string;
   resume?: boolean;
+  storageScope?: StorageScope;
+  storeRoot?: string;
 }
 
 export interface StartedWorkflowRun {
@@ -63,7 +67,10 @@ const createInitialSummary = (
   definition: WorkflowDefinition,
   workflowPath: string,
   cwd: string,
-  options: Pick<RunWorkflowOptions, "defaultModel" | "reasoningEffort" | "modelMap">
+  options: Pick<
+    RunWorkflowOptions,
+    "adapter" | "defaultModel" | "reasoningEffort" | "modelMap" | "storageScope" | "storeRoot"
+  >
 ): RunSummary => {
   const phases: PhaseSummary[] = definition.phases.map((phase) => ({
     id: phase.id,
@@ -97,6 +104,17 @@ const createInitialSummary = (
     description: definition.description,
     workflowPath,
     cwd,
+    storageScope: options.storageScope,
+    storeRoot: options.storeRoot,
+    requestedAdapter:
+      typeof options.adapter === "string"
+        ? (options.adapter as RunSummary["requestedAdapter"])
+        : options.adapter?.name === "auto" ||
+            options.adapter?.name === "simulate" ||
+            options.adapter?.name === "exec" ||
+            options.adapter?.name === "sdk"
+          ? (options.adapter.name as RunSummary["requestedAdapter"])
+          : undefined,
     status: "pending",
     createdAt,
     updatedAt: createdAt,
@@ -259,9 +277,17 @@ export class WorkflowRunner {
     const workflowPath = resolveWorkflowPath(cwd, options.workflowPath);
     const loaded = await loadWorkflowDefinition(workflowPath);
     const runId = options.runId ?? createRunId(loaded.definition.name);
+    await validateWorkflowModels(loaded.definition, {
+      adapter:
+        typeof options.adapter === "string"
+          ? options.adapter
+          : options.adapter?.name ?? "auto",
+      defaultModel: options.defaultModel,
+      modelMap: options.modelMap
+    });
     const adapter =
       typeof options.adapter === "string" || options.adapter === undefined
-        ? createWorkerAdapter(options.adapter ?? "simulate")
+        ? createWorkerAdapter(options.adapter ?? "auto")
         : options.adapter;
     let summary = options.resume
       ? await this.store.readSummary(runId)
@@ -270,6 +296,10 @@ export class WorkflowRunner {
     if (!options.resume) {
       await this.store.initRun(summary, loaded.definition, options.args ?? {}, loaded.source, {
         adapter: typeof options.adapter === "string" ? options.adapter : options.adapter?.name,
+        requestedAdapter:
+          typeof options.adapter === "string" || options.adapter === undefined
+            ? options.adapter ?? "auto"
+            : options.adapter?.name,
         defaultModel: options.defaultModel,
         reasoningEffort: options.reasoningEffort,
         modelMap: options.modelMap,
@@ -433,6 +463,7 @@ export class WorkflowRunner {
       })();
     }, 250);
 
+    let selectedAdapter = adapter.name === "auto" ? "" : adapter.name;
     try {
       const model = resolveAgentModel(phaseId, agentDefinition, options);
       const workerSpec = {
@@ -467,13 +498,35 @@ export class WorkflowRunner {
                 : `${workerSpec.prompt}\n\nPrevious output was invalid: ${validationError}\nReturn valid JSON text only.`
           },
           async (progress) => {
+            if (progress.actualAdapter && progress.actualAdapter !== selectedAdapter) {
+              selectedAdapter = progress.actualAdapter;
+              await this.store.appendEvent({
+                type: "adapter_selected",
+                runId: summary.id,
+                agentId,
+                at: nowIso(),
+                requestedAdapter:
+                  adapter.name === "auto" ||
+                  adapter.name === "simulate" ||
+                  adapter.name === "exec" ||
+                  adapter.name === "sdk"
+                    ? adapter.name
+                    : "auto",
+                actualAdapter: progress.actualAdapter,
+                fallbackReason: progress.fallbackReason
+              });
+            }
             const current = await this.mutateSummary(summary.id, (draft) => {
+              if (progress.actualAdapter) {
+                draft.actualAdapter = progress.actualAdapter;
+              }
               draft.agents = draft.agents.map((agent) =>
                 agent.id === agentId
                   ? {
                       ...agent,
                       tokens: progress.tokens ?? agent.tokens,
                       tools: progress.tools ?? agent.tools,
+                      actualAdapter: progress.actualAdapter ?? agent.actualAdapter,
                       attempts: attempt
                     }
                   : agent
@@ -502,6 +555,24 @@ export class WorkflowRunner {
           abortController.signal
         );
         lastRawOutput = result.output;
+        if (result.actualAdapter && result.actualAdapter !== selectedAdapter) {
+          selectedAdapter = result.actualAdapter;
+          await this.store.appendEvent({
+            type: "adapter_selected",
+            runId: next.id,
+            agentId,
+            at: nowIso(),
+            requestedAdapter:
+              adapter.name === "auto" ||
+              adapter.name === "simulate" ||
+              adapter.name === "exec" ||
+              adapter.name === "sdk"
+                ? adapter.name
+                : "auto",
+            actualAdapter: result.actualAdapter,
+            fallbackReason: result.fallbackReason
+          });
+        }
         try {
           findings = parseAgentFindings(result.output, agentId, phaseId, model);
           break;
@@ -522,6 +593,9 @@ export class WorkflowRunner {
       }
       let completedAgent: AgentSummary | undefined;
       next = await this.mutateSummary(summary.id, (current) => {
+        if (result.actualAdapter ?? selectedAdapter) {
+          current.actualAdapter = result.actualAdapter ?? selectedAdapter;
+        }
         current.agents = current.agents.map((agent) => {
           if (agent.id !== agentId) {
             return agent;
@@ -532,6 +606,7 @@ export class WorkflowRunner {
             tokens: result.tokens,
             tools: result.tools,
             elapsedMs: result.elapsedMs,
+            actualAdapter: result.actualAdapter ?? selectedAdapter ?? agent.actualAdapter,
             result: result.output,
             rawResult: result.output,
             findings,
@@ -563,12 +638,16 @@ export class WorkflowRunner {
       }
       const message = error instanceof Error ? error.message : String(error);
       next = await this.mutateSummary(summary.id, (current) => {
+        if (selectedAdapter) {
+          current.actualAdapter = selectedAdapter;
+        }
         current.agents = current.agents.map((agent) =>
           agent.id === agentId
             ? {
               ...agent,
                 status: cancelledByStopAgent ? "cancelled" : "failed",
                 error: cancelledByStopAgent ? undefined : message,
+                actualAdapter: selectedAdapter || agent.actualAdapter,
                 rawResult: lastRawOutput || agent.rawResult,
                 completedAt: nowIso()
               }
@@ -641,6 +720,8 @@ export class WorkflowRunner {
       `- Models: ${Array.from(modelCounts.entries())
         .map(([model, count]) => `${model} (${count})`)
         .join(", ")}`,
+      `- Requested adapter: ${summary.requestedAdapter ?? "auto"}`,
+      `- Actual adapter: ${summary.actualAdapter ?? "n/a"}`,
       `- Confirmed findings: ${confirmed.length}`,
       `- Needs human review: ${needsReview.length}`,
       `- False positives filtered: ${falsePositive.length}`,
@@ -687,6 +768,7 @@ export class WorkflowRunner {
           "",
           `- Status: ${agent.status}${agent.error ? ` (${agent.error})` : ""}`,
           `- Model: ${agent.model ?? "default"}`,
+          `- Adapter: ${agent.actualAdapter ?? "n/a"}`,
           `- Reasoning: ${agent.reasoningEffort ?? "default"}`,
           `- Tokens: ${Math.round(agent.tokens).toLocaleString()}`,
           `- Tools: ${agent.tools.toLocaleString()}`,
@@ -761,7 +843,10 @@ export class WorkflowRunner {
 }
 
 export async function runWorkflow(options: RunWorkflowOptions) {
-  const store = new RunStore(path.resolve(options.cwd));
+  const store = new RunStore(path.resolve(options.cwd), {
+    storageScope: options.storageScope,
+    storeRoot: options.storeRoot
+  });
   const runner = new WorkflowRunner(store);
   return runner.run(options);
 }

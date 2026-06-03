@@ -53,7 +53,9 @@ For MCP smoke testing, start the generated server from
   Node built-in access.
 - Bug-finding workflows should default to read-only workers.
 - Model overrides from the caller beat workflow defaults.
-- Preserve durable run state under `.codex-workflows/runs/<run-id>/`.
+- Default durable run state belongs under Codex home so read-only runs do not
+  dirty target repos. Project-local `.codex-workflows/runs/<run-id>/` is opt-in
+  and legacy-readable.
 
 ## Writing style
 

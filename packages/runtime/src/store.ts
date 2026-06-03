@@ -7,6 +7,9 @@ import {
   rm,
   writeFile
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   type AgentSummary,
@@ -14,6 +17,7 @@ import {
   ControlCommandSchema,
   type RunSummary,
   RunSummarySchema,
+  type StorageScope,
   type WorkflowDefinition,
   type WorkflowEvent,
   WorkflowEventSchema
@@ -43,15 +47,43 @@ const refreshSummaryCounts = (summary: RunSummary) => {
   };
 };
 
+export interface RunStoreOptions {
+  storageScope?: StorageScope;
+  storeRoot?: string;
+}
+
+const projectStoreRoot = (cwd: string) => path.join(cwd, ".codex-workflows");
+
+const codexHome = () => process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
+
+const projectHash = (cwd: string) =>
+  createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16);
+
+export const defaultStoreRoot = (cwd: string, storageScope: StorageScope = "codex-home") =>
+  storageScope === "project"
+    ? projectStoreRoot(cwd)
+    : path.join(codexHome(), "codex-workflows", "projects", projectHash(cwd));
+
+const dirExists = (candidate: string) => existsSync(candidate);
+
 export class RunStore {
   readonly root: string;
+  readonly storageScope: StorageScope;
+  private readonly projectRoot: string;
 
-  constructor(readonly cwd: string) {
-    this.root = path.join(cwd, ".codex-workflows");
+  constructor(readonly cwd: string, options: RunStoreOptions = {}) {
+    this.storageScope = options.storageScope ?? "codex-home";
+    this.projectRoot = projectStoreRoot(cwd);
+    this.root = options.storeRoot ?? defaultStoreRoot(cwd, this.storageScope);
   }
 
   runDir(runId: string) {
-    return path.join(this.root, "runs", runId);
+    const primary = path.join(this.root, "runs", runId);
+    const legacy = path.join(this.projectRoot, "runs", runId);
+    if (primary !== legacy && !dirExists(primary) && dirExists(legacy)) {
+      return legacy;
+    }
+    return primary;
   }
 
   statusPath(runId: string) {
@@ -91,7 +123,19 @@ export class RunStore {
     await mkdir(path.join(this.runDir(summary.id), "agents"), { recursive: true });
     await writeFile(
       path.join(this.runDir(summary.id), "manifest.json"),
-      `${JSON.stringify({ definition, args, launch }, null, 2)}\n`
+      `${JSON.stringify(
+        {
+          definition,
+          args,
+          launch,
+          storage: {
+            storageScope: this.storageScope,
+            storeRoot: this.root
+          }
+        },
+        null,
+        2
+      )}\n`
     );
     await writeFile(path.join(this.runDir(summary.id), "script.workflow.js"), source);
     await this.writeSummary(summary);
@@ -103,6 +147,7 @@ export class RunStore {
       definition: WorkflowDefinition;
       args: unknown;
       launch?: Record<string, unknown>;
+      storage?: Record<string, unknown>;
     };
   }
 
@@ -126,6 +171,8 @@ export class RunStore {
   async writeSummary(summary: RunSummary) {
     const parsed = RunSummarySchema.parse({
       ...summary,
+      storageScope: summary.storageScope ?? this.storageScope,
+      storeRoot: summary.storeRoot ?? this.root,
       updatedAt: nowIso()
     });
     const statusPath = this.statusPath(summary.id);
@@ -165,12 +212,22 @@ export class RunStore {
 
   async listRuns() {
     await this.ensure();
-    const dir = path.join(this.root, "runs");
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    const dirs = [path.join(this.root, "runs")];
+    const legacy = path.join(this.projectRoot, "runs");
+    if (legacy !== dirs[0]) {
+      dirs.push(legacy);
+    }
+    const runIds = new Set<string>();
+    for (const dir of dirs) {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          runIds.add(entry.name);
+        }
+      }
+    }
     const runs = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => this.readSummary(entry.name).catch(() => null))
+      Array.from(runIds).map((runId) => this.readSummary(runId).catch(() => null))
     );
     return runs
       .filter((run): run is RunSummary => run !== null)
@@ -248,7 +305,7 @@ export class RunStore {
     if (!name) {
       throw new Error("Saved workflow name must include a letter or number.");
     }
-    const workflowPath = path.join(this.root, "workflows", `${name}.workflow.js`);
+    const workflowPath = path.join(this.projectRoot, "workflows", `${name}.workflow.js`);
     const skillDir = path.join(this.cwd, ".agents", "skills", name);
     const skillPath = path.join(skillDir, "SKILL.md");
     await mkdir(path.dirname(workflowPath), { recursive: true });

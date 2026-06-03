@@ -20,7 +20,13 @@ The code is split so those two jobs do not get tangled.
 
 ## Run state
 
-Every run writes to `.codex-workflows/runs/<run-id>/`:
+By default, read-only workflow runs write under
+`${CODEX_HOME:-~/.codex}/codex-workflows/projects/<project-hash>/runs/<run-id>/`
+so bug hunts do not dirty the target checkout. Project-local storage is still
+available with `storageScope: "project"` or `--storage-scope project`, and
+legacy `.codex-workflows/runs/<run-id>/` directories remain readable.
+
+Each run directory contains:
 
 - `manifest.json`: workflow definition, args, and launch options.
 - `status.json`: current summary for the TUI and MCP status calls.

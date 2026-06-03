@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { spawn } from "node:child_process";
 import { Box, Text, useInput, useStdout } from "ink";
-import type { AgentSummary, RunSummary } from "@codex-workflows/schemas";
-import { nowIso, RunStore } from "@codex-workflows/runtime";
+import type { AgentSummary, RunSummary, StorageScope } from "@codex-workflows/schemas";
+import { defaultStoreRoot, nowIso, RunStore } from "@codex-workflows/runtime";
 import { formatCount, formatDuration, truncateMiddle } from "./format.js";
 
 export interface DashboardProps {
   cwd: string;
   runId: string;
+  storageScope?: StorageScope;
+  storeRoot?: string;
   exitOnComplete?: boolean;
   onExit?: () => void;
 }
@@ -117,6 +119,18 @@ export function DashboardFrame({
         </Text>
       </Box>
       <Text color="gray">{summary.description}</Text>
+      <Box justifyContent="space-between">
+        <Text color={summary.status === "failed" ? "red" : summary.status === "completed" ? "green" : "gray"}>
+          {summary.status}
+          {summary.error ? ` · ${truncateMiddle(summary.error, Math.max(20, width - 72))}` : ""}
+        </Text>
+        <Text color="gray">
+          {summary.requestedAdapter ?? "auto"} → {summary.actualAdapter ?? "pending"}
+        </Text>
+      </Box>
+      {summary.finalReportPath ? (
+        <Text color="gray">Report: {truncateMiddle(summary.finalReportPath, width - 8)}</Text>
+      ) : null}
       <Box marginTop={1} borderStyle="single" borderColor="gray">
         <Box width={sidebarWidth} flexDirection="column" borderStyle="single" borderTop={false} borderBottom={false} borderLeft={false}>
           <Text>Phases</Text>
@@ -198,8 +212,19 @@ export function DashboardFrame({
   );
 }
 
-export function RunDashboard({ cwd, runId, exitOnComplete = false, onExit }: DashboardProps) {
-  const store = useMemo(() => new RunStore(cwd), [cwd]);
+export function RunDashboard({
+  cwd,
+  runId,
+  storageScope = "codex-home",
+  storeRoot,
+  exitOnComplete = false,
+  onExit
+}: DashboardProps) {
+  const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(cwd, storageScope);
+  const store = useMemo(
+    () => new RunStore(cwd, { storageScope, storeRoot: resolvedStoreRoot }),
+    [cwd, resolvedStoreRoot, storageScope]
+  );
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [selectedPhaseId, setSelectedPhaseId] = useState<string | undefined>();
   const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>();
@@ -313,7 +338,18 @@ export function RunDashboard({ cwd, runId, exitOnComplete = false, onExit }: Das
     if (input === "r" && selectedAgentId) {
       const child = spawn(
         process.execPath,
-        [process.argv[1] ?? "", "restart-agent", runId, selectedAgentId, "--cwd", cwd],
+        [
+          process.argv[1] ?? "",
+          "restart-agent",
+          runId,
+          selectedAgentId,
+          "--cwd",
+          cwd,
+          "--storage-scope",
+          storageScope,
+          "--store-root",
+          resolvedStoreRoot
+        ],
         { stdio: "ignore", detached: true }
       );
       child.unref();

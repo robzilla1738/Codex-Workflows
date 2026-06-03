@@ -19,6 +19,8 @@ export interface WorkerProgress {
   tokens?: number;
   tools?: number;
   message?: string;
+  actualAdapter?: string;
+  fallbackReason?: string;
 }
 
 export interface WorkerResult {
@@ -26,6 +28,8 @@ export interface WorkerResult {
   tokens: number;
   tools: number;
   elapsedMs: number;
+  actualAdapter?: string;
+  fallbackReason?: string;
 }
 
 export interface WorkerAdapter {
@@ -106,10 +110,64 @@ export class SimulatedCodexAdapter implements WorkerAdapter {
       ),
       tokens: targetTokens,
       tools: targetTools,
-      elapsedMs: Date.now() - started
+      elapsedMs: Date.now() - started,
+      actualAdapter: this.name
     };
   }
 }
+
+const cleanStderr = (stderr: string) =>
+  stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        line !== "Reading additional input from stdin..." &&
+        !line.includes("unknown feature key in config")
+    )
+    .join("\n");
+
+const errorMessageFromEvent = (event: Record<string, unknown>) => {
+  if (event.type === "error" && typeof event.message === "string") {
+    return event.message;
+  }
+  if (event.type === "turn.failed") {
+    const error = event.error as Record<string, unknown> | undefined;
+    if (typeof error?.message === "string") {
+      return error.message;
+    }
+  }
+  return undefined;
+};
+
+const normalizeCodexError = (raw: string) => {
+  let message = raw.trim();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!message.startsWith("{")) {
+      break;
+    }
+    try {
+      const parsed = JSON.parse(message) as {
+        error?: { message?: unknown };
+        message?: unknown;
+      };
+      const next =
+        typeof parsed.error?.message === "string"
+          ? parsed.error.message
+          : typeof parsed.message === "string"
+            ? parsed.message
+            : undefined;
+      if (!next || next === message) {
+        break;
+      }
+      message = next;
+    } catch {
+      break;
+    }
+  }
+  return message;
+};
 
 export class CodexExecAdapter implements WorkerAdapter {
   readonly name = "exec";
@@ -120,6 +178,7 @@ export class CodexExecAdapter implements WorkerAdapter {
     signal?: AbortSignal
   ): Promise<WorkerResult> {
     const started = Date.now();
+    const codexBin = process.env.CODEX_WORKFLOWS_CODEX_BIN ?? "codex";
     const args = [
       "exec",
       "--json",
@@ -139,7 +198,7 @@ export class CodexExecAdapter implements WorkerAdapter {
     args.push(spec.prompt);
 
     return new Promise<WorkerResult>((resolve, reject) => {
-      const child = spawn("codex", args, {
+      const child = spawn(codexBin, args, {
         cwd: spec.cwd,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -147,6 +206,7 @@ export class CodexExecAdapter implements WorkerAdapter {
       let tokens = 0;
       let tools = 0;
       let stderr = "";
+      let structuredError = "";
 
       signal?.addEventListener(
         "abort",
@@ -165,6 +225,11 @@ export class CodexExecAdapter implements WorkerAdapter {
           }
           try {
             const event = JSON.parse(line) as Record<string, unknown>;
+            const eventError = errorMessageFromEvent(event);
+            if (eventError) {
+              structuredError = normalizeCodexError(eventError);
+              onProgress({ message: `error: ${structuredError}` });
+            }
             if (event.type === "turn.completed") {
               const usage = event.usage as Record<string, number> | undefined;
               tokens = usage
@@ -175,8 +240,15 @@ export class CodexExecAdapter implements WorkerAdapter {
               onProgress({ tokens });
             }
             if (event.type === "item.completed") {
-              tools += 1;
               const item = event.item as Record<string, unknown> | undefined;
+              if (
+                item?.type === "command_execution" ||
+                item?.type === "mcp_tool_call" ||
+                item?.type === "web_search" ||
+                item?.type === "file_change"
+              ) {
+                tools += 1;
+              }
               if (item?.type === "agent_message" && typeof item.text === "string") {
                 finalOutput = item.text;
               }
@@ -190,18 +262,24 @@ export class CodexExecAdapter implements WorkerAdapter {
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
         stderr += chunk;
+        const cleaned = cleanStderr(chunk);
+        if (cleaned) {
+          onProgress({ message: `stderr: ${cleaned.slice(0, 500)}` });
+        }
       });
       child.on("error", reject);
       child.on("close", (code) => {
         if (code !== 0) {
-          reject(new Error(stderr || `codex exec exited with code ${code}`));
+          const cleaned = cleanStderr(stderr);
+          reject(new Error(structuredError || cleaned || `codex exec exited with code ${code}`));
           return;
         }
         resolve({
           output: finalOutput.trim() || "Codex worker completed.",
           tokens,
           tools,
-          elapsedMs: Date.now() - started
+          elapsedMs: Date.now() - started,
+          actualAdapter: this.name
         });
       });
     });
@@ -262,7 +340,8 @@ export class CodexSdkAdapter implements WorkerAdapter {
         output: output.trim() || "Codex SDK worker completed without a final message.",
         tokens,
         tools,
-        elapsedMs: Date.now() - started
+        elapsedMs: Date.now() - started,
+        actualAdapter: this.name
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -271,7 +350,48 @@ export class CodexSdkAdapter implements WorkerAdapter {
   }
 }
 
+const isSdkLaunchUnavailable = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("Unable to locate Codex CLI binaries") ||
+    message.includes("Cannot find module") ||
+    message.includes("ERR_MODULE_NOT_FOUND") ||
+    message.includes("@openai/codex")
+  );
+};
+
+export class AutoCodexAdapter implements WorkerAdapter {
+  readonly name = "auto";
+
+  constructor(
+    private readonly sdk: WorkerAdapter = new CodexSdkAdapter(),
+    private readonly exec: WorkerAdapter = new CodexExecAdapter()
+  ) {}
+
+  async runWorker(
+    spec: WorkerSpec,
+    onProgress: (progress: WorkerProgress) => void,
+    signal?: AbortSignal
+  ): Promise<WorkerResult> {
+    try {
+      const result = await this.sdk.runWorker(spec, onProgress, signal);
+      return { ...result, actualAdapter: "sdk" };
+    } catch (error) {
+      if (!isSdkLaunchUnavailable(error)) {
+        throw error;
+      }
+      const fallbackReason = error instanceof Error ? error.message : String(error);
+      onProgress({ actualAdapter: "exec", fallbackReason });
+      const result = await this.exec.runWorker(spec, onProgress, signal);
+      return { ...result, actualAdapter: "exec", fallbackReason };
+    }
+  }
+}
+
 export const createWorkerAdapter = (name: string): WorkerAdapter => {
+  if (name === "auto") {
+    return new AutoCodexAdapter();
+  }
   if (name === "exec") {
     return new CodexExecAdapter();
   }

@@ -19,22 +19,34 @@ repeatable multi-agent process.
 4. Expect `workflow_run` to open the live terminal dashboard automatically in
    the user's default terminal. Pass `openTui: false` only when the user asks
    for a headless run.
-5. When the user names subagent models, pass them through exactly:
+5. Use `adapter: "auto"` for real Codex runs unless the user explicitly asks
+   for `sdk`, `exec`, or `simulate`. Auto tries SDK first and falls back to
+   `codex exec` when SDK cannot launch.
+6. When the user names subagent models, pass them as Codex model slugs:
    - `model` sets the default worker model and overrides workflow-file models.
    - `reasoning` sets default Codex reasoning effort.
    - `modelMap` maps phase id, agent id, or `phase:agent` to a model.
    - `promptSuffix` appends user-specific output instructions to every worker.
-6. Use the system-default/wide terminal defaults unless the user asks otherwise:
+   - If the user gives shorthand such as `5.4-mini`, use the full Codex slug
+     if known, such as `gpt-5.4-mini`. The runtime validates model names before
+     fanout and will return a clear error if the model is unavailable.
+7. For read-only review, do not pass `approval: "deny"`. That denies workflow
+   launch. Rely on read-only worker sandboxing and explicit no-mutation
+   instructions in `promptSuffix`.
+8. Use the system-default/wide terminal defaults unless the user asks otherwise:
    `terminalApp: "default"`, `terminalColumns: 190`, `terminalRows: 42`.
-7. If MCP is unavailable in an installed plugin, ask the user to restart Codex
+9. Store normal bug-hunt run artifacts in Codex home by default. Use
+   `storageScope: "project"` only when the user asks for project-local run
+   logs or when saving a reusable workflow.
+10. If MCP is unavailable in an installed plugin, ask the user to restart Codex
    or reinstall/enable the plugin before running workflows. Use the repo-local
    `pnpm cwf` CLI only when working inside the `codex-workflows` source repo.
-8. Keep the main Codex thread concise. Poll status and summarize progress
+11. Keep the main Codex thread concise. Poll status and summarize progress
    instead of pasting raw worker logs.
-9. For bug finding, default to `workflows/bug-sweep.workflow.js`.
-10. For release review, default to `workflows/release-diff-review.workflow.js`.
-11. For security review, default to `workflows/security-auth-review.workflow.js`.
-12. Before write-capable workflows, state the sandbox mode and ask for approval.
+12. For bug finding, default to `workflows/bug-sweep.workflow.js`.
+13. For release review, default to `workflows/release-diff-review.workflow.js`.
+14. For security review, default to `workflows/security-auth-review.workflow.js`.
+15. Before write-capable workflows, state the sandbox mode and ask for approval.
 
 ## Source Repo CLI Fallback
 
@@ -44,7 +56,7 @@ source checkout. Installed plugin users should use the MCP tools.
 ```bash
 pnpm cwf validate workflows/bug-sweep.workflow.js
 pnpm cwf run workflows/bug-sweep.workflow.js --watch \
-  --adapter sdk \
+  --adapter auto \
   --model gpt-5.5 \
   --reasoning xhigh \
   --model-map '{"find":"gpt-5.5-mini","synthesize":"gpt-5.5"}'

@@ -200,11 +200,13 @@ Use a supervisor process:
 4. Require approval for the script hash and capabilities.
 5. Execute phases.
 6. Spawn workers through Codex SDK/app-server, with `codex exec --json` as fallback.
-7. Persist all events to `.codex-workflows/runs/<run-id>/events.jsonl`.
+7. Persist all events to the run store, defaulting to
+   `${CODEX_HOME:-~/.codex}/codex-workflows/projects/<project-hash>/runs/<run-id>/events.jsonl`
+   so read-only runs do not dirty target repos.
 8. Persist checkpoints, agent results, token usage, patches, and final report.
 9. Expose status through MCP and the `cwf` CLI.
 
-Suggested run directory:
+Suggested project-local run directory when `storageScope: "project"` is used:
 
 ```text
 .codex-workflows/runs/2026-06-03T20-12-48Z-abc123/

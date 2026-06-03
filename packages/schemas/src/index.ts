@@ -33,6 +33,8 @@ export const SandboxModeSchema = z.enum([
 ]);
 
 export const ReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
+export const WorkerAdapterNameSchema = z.enum(["auto", "simulate", "exec", "sdk"]);
+export const StorageScopeSchema = z.enum(["codex-home", "project"]);
 
 export const FindingVerdictSchema = z.enum([
   "confirmed",
@@ -100,6 +102,7 @@ export const AgentSummarySchema = z.object({
   prompt: z.string(),
   model: z.string().optional(),
   reasoningEffort: ReasoningEffortSchema.optional(),
+  actualAdapter: z.string().optional(),
   sandbox: SandboxModeSchema,
   status: AgentStatusSchema,
   tokens: z.number().nonnegative().default(0),
@@ -131,6 +134,10 @@ export const RunSummarySchema = z.object({
   description: z.string(),
   workflowPath: z.string(),
   cwd: z.string(),
+  storageScope: StorageScopeSchema.optional(),
+  storeRoot: z.string().optional(),
+  requestedAdapter: WorkerAdapterNameSchema.optional(),
+  actualAdapter: z.string().optional(),
   status: RunStatusSchema,
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -175,6 +182,15 @@ export const WorkflowEventSchema = z.discriminatedUnion("type", [
     agentId: z.string(),
     phaseId: z.string(),
     at: z.string()
+  }),
+  z.object({
+    type: z.literal("adapter_selected"),
+    runId: z.string(),
+    agentId: z.string(),
+    at: z.string(),
+    requestedAdapter: WorkerAdapterNameSchema,
+    actualAdapter: z.string(),
+    fallbackReason: z.string().optional()
   }),
   z.object({
     type: z.literal("agent_updated"),
@@ -298,6 +314,8 @@ export type PhaseStatus = z.infer<typeof PhaseStatusSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;
 export type SandboxMode = z.infer<typeof SandboxModeSchema>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
+export type WorkerAdapterName = z.infer<typeof WorkerAdapterNameSchema>;
+export type StorageScope = z.infer<typeof StorageScopeSchema>;
 export type AgentFinding = z.infer<typeof AgentFindingSchema>;
 export type AgentDefinition = z.infer<typeof AgentDefinitionSchema>;
 export type PhaseDefinition = z.infer<typeof PhaseDefinitionSchema>;

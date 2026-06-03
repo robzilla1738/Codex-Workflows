@@ -27,7 +27,7 @@ codex plugin add codex-workflows@codex-workflows
 Start a new Codex thread after installing. Then ask:
 
 ```text
-Use codex-workflows to run the bug-sweep workflow with adapter sdk.
+Use codex-workflows to run the bug-sweep workflow with adapter auto.
 Open the live dashboard automatically and tell me the run id and status.
 ```
 
@@ -44,7 +44,10 @@ from Codex or from the CLI.
   boundary review.
 - Live dashboard with phases, agent rows, token/tool/time metrics, detail view,
   pause/resume/stop/restart/save controls, and final report path.
-- Durable run state under `.codex-workflows/runs/<run-id>/`.
+- Durable run state under `${CODEX_HOME:-~/.codex}/codex-workflows/projects/<project-hash>/runs/<run-id>/`
+  by default, so read-only bug hunts do not dirty the target repo.
+- Project-local storage remains available with `storageScope: "project"` or
+  `--storage-scope project`.
 - Isolated workflow script loading through QuickJS. Workflow scripts define
   phases and agent prompts; they do not get direct filesystem, shell, network,
   process, or Node built-in access.
@@ -54,7 +57,7 @@ from Codex or from the CLI.
 You can route models globally or by phase/agent:
 
 ```text
-Use codex-workflows to run bug-sweep with adapter sdk,
+Use codex-workflows to run bug-sweep with adapter auto,
 model gpt-5.5, reasoning xhigh,
 and modelMap {"find":"gpt-5.4-mini","synthesize":"gpt-5.5"}.
 ```
@@ -65,6 +68,10 @@ Caller overrides win over workflow defaults:
 - `reasoning`: default Codex reasoning effort.
 - `modelMap`: phase id, agent id, or `phase:agent` overrides.
 - `promptSuffix`: extra instruction appended to every worker.
+
+Model names are validated against the local `codex debug models` catalog before
+any agents launch. Short names such as `5.4-mini` are rejected with a suggestion
+like `gpt-5.4-mini`; they are not silently rewritten.
 
 Bug-finding workflows default to read-only workers unless a workflow explicitly
 declares otherwise.
@@ -77,6 +84,7 @@ pnpm validate:plugin
 pnpm test
 pnpm cwf validate workflows/bug-sweep.workflow.js
 pnpm cwf run workflows/bug-sweep.workflow.js --watch --adapter simulate
+pnpm cwf run workflows/bug-sweep.workflow.js --watch --adapter auto --model gpt-5.4-mini
 ```
 
 Useful local commands:

@@ -29877,7 +29877,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash: createHash2 } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash3 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -30545,7 +30545,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash3("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -30914,7 +30914,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter3 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash2 } = __require("crypto");
+    var { createHash: createHash3 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -31221,7 +31221,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash3("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -33476,7 +33476,7 @@ __export(dist_exports, {
 import { promises as fs3 } from "fs";
 import os3 from "os";
 import path2 from "path";
-import { spawn } from "child_process";
+import { spawn as spawn2 } from "child_process";
 import { statSync } from "fs";
 import path22 from "path";
 import readline from "readline";
@@ -33920,7 +33920,7 @@ var init_dist2 = __esm({
         if (this.pathDirs.length > 0) {
           prependPathDirs(env3, this.pathDirs);
         }
-        const child = spawn(this.executablePath, commandArgs, {
+        const child = spawn2(this.executablePath, commandArgs, {
           env: env3,
           signal: args.signal
         });
@@ -34305,7 +34305,7 @@ var require_jsx_runtime = __commonJS({
 
 // packages/cli/src/index.tsx
 import path5 from "node:path";
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync3 } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // node_modules/.pnpm/commander@14.0.3/node_modules/commander/esm.mjs
@@ -57892,6 +57892,8 @@ var SandboxModeSchema = external_exports.enum([
   "danger-full-access"
 ]);
 var ReasoningEffortSchema = external_exports.enum(["minimal", "low", "medium", "high", "xhigh"]);
+var WorkerAdapterNameSchema = external_exports.enum(["auto", "simulate", "exec", "sdk"]);
+var StorageScopeSchema = external_exports.enum(["codex-home", "project"]);
 var FindingVerdictSchema = external_exports.enum([
   "confirmed",
   "false-positive",
@@ -57951,6 +57953,7 @@ var AgentSummarySchema = external_exports.object({
   prompt: external_exports.string(),
   model: external_exports.string().optional(),
   reasoningEffort: ReasoningEffortSchema.optional(),
+  actualAdapter: external_exports.string().optional(),
   sandbox: SandboxModeSchema,
   status: AgentStatusSchema,
   tokens: external_exports.number().nonnegative().default(0),
@@ -57980,6 +57983,10 @@ var RunSummarySchema = external_exports.object({
   description: external_exports.string(),
   workflowPath: external_exports.string(),
   cwd: external_exports.string(),
+  storageScope: StorageScopeSchema.optional(),
+  storeRoot: external_exports.string().optional(),
+  requestedAdapter: WorkerAdapterNameSchema.optional(),
+  actualAdapter: external_exports.string().optional(),
   status: RunStatusSchema,
   createdAt: external_exports.string(),
   updatedAt: external_exports.string(),
@@ -58023,6 +58030,15 @@ var WorkflowEventSchema = external_exports.discriminatedUnion("type", [
     agentId: external_exports.string(),
     phaseId: external_exports.string(),
     at: external_exports.string()
+  }),
+  external_exports.object({
+    type: external_exports.literal("adapter_selected"),
+    runId: external_exports.string(),
+    agentId: external_exports.string(),
+    at: external_exports.string(),
+    requestedAdapter: WorkerAdapterNameSchema,
+    actualAdapter: external_exports.string(),
+    fallbackReason: external_exports.string().optional()
   }),
   external_exports.object({
     type: external_exports.literal("agent_updated"),
@@ -58220,11 +58236,125 @@ async function validateWorkflowDefinition(workflowPath) {
   }
 }
 
+// packages/runtime/dist/models.js
+import { spawn } from "node:child_process";
+var ModelValidationError = class extends Error {
+  issues;
+  validModels;
+  constructor(issues, validModels) {
+    super([
+      "Unsupported Codex worker model requested.",
+      ...issues.map((issue2) => issue2.suggestion ? `- ${issue2.model} is not available. Did you mean ${issue2.suggestion}?` : `- ${issue2.model} is not available.`),
+      `Available models: ${validModels.join(", ")}`
+    ].join("\n"));
+    this.issues = issues;
+    this.validModels = validModels;
+  }
+};
+var parseCodexModelCatalog = (raw) => {
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed.models)) {
+    throw new Error("codex debug models did not return a models array.");
+  }
+  return parsed.models.map((model) => {
+    const entry = model;
+    if (typeof entry.slug !== "string" || !entry.slug) {
+      return null;
+    }
+    return {
+      slug: entry.slug,
+      supportedReasoningLevels: Array.isArray(entry.supported_reasoning_levels) ? entry.supported_reasoning_levels.map((level) => level.effort).filter((effort) => typeof effort === "string") : []
+    };
+  }).filter((entry) => entry !== null);
+};
+var readCodexModelCatalog = (timeoutMs = 1e4) => new Promise((resolve, reject) => {
+  if (process.env.CODEX_WORKFLOWS_MODEL_CATALOG) {
+    try {
+      resolve(parseCodexModelCatalog(process.env.CODEX_WORKFLOWS_MODEL_CATALOG));
+    } catch (error51) {
+      reject(error51);
+    }
+    return;
+  }
+  const child = spawn(process.env.CODEX_WORKFLOWS_CODEX_BIN ?? "codex", ["debug", "models"], {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stdout = "";
+  let stderr = "";
+  const timer = setTimeout(() => {
+    child.kill("SIGTERM");
+    reject(new Error("Timed out while running codex debug models."));
+  }, timeoutMs);
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.on("error", (error51) => {
+    clearTimeout(timer);
+    reject(error51);
+  });
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    if (code !== 0) {
+      reject(new Error(stderr.trim() || `codex debug models exited with code ${code}`));
+      return;
+    }
+    try {
+      resolve(parseCodexModelCatalog(stdout));
+    } catch (error51) {
+      reject(error51);
+    }
+  });
+});
+var suggestModel = (model, validModels) => {
+  const prefixed = model.startsWith("gpt-") ? model : `gpt-${model}`;
+  if (validModels.includes(prefixed)) {
+    return prefixed;
+  }
+  const lower = model.toLowerCase();
+  return validModels.find((valid) => valid.toLowerCase().endsWith(lower));
+};
+var resolveAgentModel = (phaseId, agent, options) => options.modelMap?.[`${phaseId}:${agent.id}`] ?? options.modelMap?.[agent.id] ?? options.modelMap?.[phaseId] ?? options.defaultModel ?? agent.model;
+var collectWorkflowModels = (definition, options) => {
+  const models = /* @__PURE__ */ new Set();
+  for (const phase of definition.phases) {
+    for (const agent of phase.agents) {
+      const model = resolveAgentModel(phase.id, agent, options);
+      if (model && model !== "Codex") {
+        models.add(model);
+      }
+    }
+  }
+  return Array.from(models);
+};
+var validateRequestedModels = async (models) => {
+  const uniqueModels = Array.from(new Set(models.filter(Boolean)));
+  if (uniqueModels.length === 0) {
+    return;
+  }
+  const catalog = await readCodexModelCatalog();
+  const validModels = catalog.map((entry) => entry.slug).sort();
+  const issues = uniqueModels.filter((model) => !validModels.includes(model)).map((model) => ({ model, suggestion: suggestModel(model, validModels) }));
+  if (issues.length > 0) {
+    throw new ModelValidationError(issues, validModels);
+  }
+};
+var validateWorkflowModels = async (definition, options) => {
+  if (!options.adapter || options.adapter === "simulate") {
+    return;
+  }
+  await validateRequestedModels(collectWorkflowModels(definition, options));
+};
+
 // packages/runtime/dist/runner.js
 import path4 from "node:path";
 
 // packages/codex-adapter/dist/index.js
-import { spawn as spawn2 } from "node:child_process";
+import { spawn as spawn3 } from "node:child_process";
 var sleep = (ms, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) {
     reject(new Error("Worker aborted"));
@@ -58278,14 +58408,48 @@ var SimulatedCodexAdapter = class {
       }, null, 2),
       tokens: targetTokens,
       tools: targetTools,
-      elapsedMs: Date.now() - started
+      elapsedMs: Date.now() - started,
+      actualAdapter: this.name
     };
   }
+};
+var cleanStderr = (stderr) => stderr.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && line !== "Reading additional input from stdin..." && !line.includes("unknown feature key in config")).join("\n");
+var errorMessageFromEvent = (event) => {
+  if (event.type === "error" && typeof event.message === "string") {
+    return event.message;
+  }
+  if (event.type === "turn.failed") {
+    const error51 = event.error;
+    if (typeof error51?.message === "string") {
+      return error51.message;
+    }
+  }
+  return void 0;
+};
+var normalizeCodexError = (raw) => {
+  let message = raw.trim();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!message.startsWith("{")) {
+      break;
+    }
+    try {
+      const parsed = JSON.parse(message);
+      const next = typeof parsed.error?.message === "string" ? parsed.error.message : typeof parsed.message === "string" ? parsed.message : void 0;
+      if (!next || next === message) {
+        break;
+      }
+      message = next;
+    } catch {
+      break;
+    }
+  }
+  return message;
 };
 var CodexExecAdapter = class {
   name = "exec";
   async runWorker(spec, onProgress, signal) {
     const started = Date.now();
+    const codexBin = process.env.CODEX_WORKFLOWS_CODEX_BIN ?? "codex";
     const args = [
       "exec",
       "--json",
@@ -58304,7 +58468,7 @@ var CodexExecAdapter = class {
     }
     args.push(spec.prompt);
     return new Promise((resolve, reject) => {
-      const child = spawn2("codex", args, {
+      const child = spawn3(codexBin, args, {
         cwd: spec.cwd,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -58312,6 +58476,7 @@ var CodexExecAdapter = class {
       let tokens = 0;
       let tools = 0;
       let stderr = "";
+      let structuredError = "";
       signal?.addEventListener("abort", () => {
         child.kill("SIGTERM");
         reject(new Error("Worker aborted"));
@@ -58324,14 +58489,21 @@ var CodexExecAdapter = class {
           }
           try {
             const event = JSON.parse(line);
+            const eventError = errorMessageFromEvent(event);
+            if (eventError) {
+              structuredError = normalizeCodexError(eventError);
+              onProgress({ message: `error: ${structuredError}` });
+            }
             if (event.type === "turn.completed") {
               const usage = event.usage;
               tokens = usage ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.reasoning_output_tokens ?? 0) : tokens;
               onProgress({ tokens });
             }
             if (event.type === "item.completed") {
-              tools += 1;
               const item = event.item;
+              if (item?.type === "command_execution" || item?.type === "mcp_tool_call" || item?.type === "web_search" || item?.type === "file_change") {
+                tools += 1;
+              }
               if (item?.type === "agent_message" && typeof item.text === "string") {
                 finalOutput = item.text;
               }
@@ -58346,18 +58518,24 @@ var CodexExecAdapter = class {
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk) => {
         stderr += chunk;
+        const cleaned = cleanStderr(chunk);
+        if (cleaned) {
+          onProgress({ message: `stderr: ${cleaned.slice(0, 500)}` });
+        }
       });
       child.on("error", reject);
       child.on("close", (code) => {
         if (code !== 0) {
-          reject(new Error(stderr || `codex exec exited with code ${code}`));
+          const cleaned = cleanStderr(stderr);
+          reject(new Error(structuredError || cleaned || `codex exec exited with code ${code}`));
           return;
         }
         resolve({
           output: finalOutput.trim() || "Codex worker completed.",
           tokens,
           tools,
-          elapsedMs: Date.now() - started
+          elapsedMs: Date.now() - started,
+          actualAdapter: this.name
         });
       });
     });
@@ -58404,7 +58582,8 @@ var CodexSdkAdapter = class {
         output: output.trim() || "Codex SDK worker completed without a final message.",
         tokens,
         tools,
-        elapsedMs: Date.now() - started
+        elapsedMs: Date.now() - started,
+        actualAdapter: this.name
       };
     } catch (error51) {
       const message = error51 instanceof Error ? error51.message : String(error51);
@@ -58412,7 +58591,37 @@ var CodexSdkAdapter = class {
     }
   }
 };
+var isSdkLaunchUnavailable = (error51) => {
+  const message = error51 instanceof Error ? error51.message : String(error51);
+  return message.includes("Unable to locate Codex CLI binaries") || message.includes("Cannot find module") || message.includes("ERR_MODULE_NOT_FOUND") || message.includes("@openai/codex");
+};
+var AutoCodexAdapter = class {
+  sdk;
+  exec;
+  name = "auto";
+  constructor(sdk = new CodexSdkAdapter(), exec3 = new CodexExecAdapter()) {
+    this.sdk = sdk;
+    this.exec = exec3;
+  }
+  async runWorker(spec, onProgress, signal) {
+    try {
+      const result = await this.sdk.runWorker(spec, onProgress, signal);
+      return { ...result, actualAdapter: "sdk" };
+    } catch (error51) {
+      if (!isSdkLaunchUnavailable(error51)) {
+        throw error51;
+      }
+      const fallbackReason = error51 instanceof Error ? error51.message : String(error51);
+      onProgress({ actualAdapter: "exec", fallbackReason });
+      const result = await this.exec.runWorker(spec, onProgress, signal);
+      return { ...result, actualAdapter: "exec", fallbackReason };
+    }
+  }
+};
 var createWorkerAdapter = (name) => {
+  if (name === "auto") {
+    return new AutoCodexAdapter();
+  }
   if (name === "exec") {
     return new CodexExecAdapter();
   }
@@ -58424,6 +58633,9 @@ var createWorkerAdapter = (name) => {
 
 // packages/runtime/dist/store.js
 import { copyFile, mkdir, readFile as readFile2, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { existsSync as existsSync2 } from "node:fs";
+import { createHash as createHash2 } from "node:crypto";
+import { homedir } from "node:os";
 import path3 from "node:path";
 var elapsed = (startedAt) => startedAt ? Math.max(0, Date.now() - new Date(startedAt).getTime()) : 0;
 var refreshSummaryCounts = (summary) => {
@@ -58445,15 +58657,29 @@ var refreshSummaryCounts = (summary) => {
     elapsedMs: elapsed(summary.startedAt)
   };
 };
+var projectStoreRoot = (cwd2) => path3.join(cwd2, ".codex-workflows");
+var codexHome = () => process.env.CODEX_HOME ?? path3.join(homedir(), ".codex");
+var projectHash = (cwd2) => createHash2("sha256").update(path3.resolve(cwd2)).digest("hex").slice(0, 16);
+var defaultStoreRoot = (cwd2, storageScope = "codex-home") => storageScope === "project" ? projectStoreRoot(cwd2) : path3.join(codexHome(), "codex-workflows", "projects", projectHash(cwd2));
+var dirExists = (candidate) => existsSync2(candidate);
 var RunStore = class {
   cwd;
   root;
-  constructor(cwd2) {
+  storageScope;
+  projectRoot;
+  constructor(cwd2, options = {}) {
     this.cwd = cwd2;
-    this.root = path3.join(cwd2, ".codex-workflows");
+    this.storageScope = options.storageScope ?? "codex-home";
+    this.projectRoot = projectStoreRoot(cwd2);
+    this.root = options.storeRoot ?? defaultStoreRoot(cwd2, this.storageScope);
   }
   runDir(runId) {
-    return path3.join(this.root, "runs", runId);
+    const primary = path3.join(this.root, "runs", runId);
+    const legacy = path3.join(this.projectRoot, "runs", runId);
+    if (primary !== legacy && !dirExists(primary) && dirExists(legacy)) {
+      return legacy;
+    }
+    return primary;
   }
   statusPath(runId) {
     return path3.join(this.runDir(runId), "status.json");
@@ -58478,7 +58704,15 @@ var RunStore = class {
     await this.ensure();
     await mkdir(this.runDir(summary.id), { recursive: true });
     await mkdir(path3.join(this.runDir(summary.id), "agents"), { recursive: true });
-    await writeFile(path3.join(this.runDir(summary.id), "manifest.json"), `${JSON.stringify({ definition, args, launch }, null, 2)}
+    await writeFile(path3.join(this.runDir(summary.id), "manifest.json"), `${JSON.stringify({
+      definition,
+      args,
+      launch,
+      storage: {
+        storageScope: this.storageScope,
+        storeRoot: this.root
+      }
+    }, null, 2)}
 `);
     await writeFile(path3.join(this.runDir(summary.id), "script.workflow.js"), source);
     await this.writeSummary(summary);
@@ -58503,6 +58737,8 @@ var RunStore = class {
   async writeSummary(summary) {
     const parsed = RunSummarySchema.parse({
       ...summary,
+      storageScope: summary.storageScope ?? this.storageScope,
+      storeRoot: summary.storeRoot ?? this.root,
       updatedAt: nowIso()
     });
     const statusPath = this.statusPath(summary.id);
@@ -58540,9 +58776,21 @@ var RunStore = class {
   }
   async listRuns() {
     await this.ensure();
-    const dir = path3.join(this.root, "runs");
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
-    const runs = await Promise.all(entries.filter((entry) => entry.isDirectory()).map((entry) => this.readSummary(entry.name).catch(() => null)));
+    const dirs = [path3.join(this.root, "runs")];
+    const legacy = path3.join(this.projectRoot, "runs");
+    if (legacy !== dirs[0]) {
+      dirs.push(legacy);
+    }
+    const runIds = /* @__PURE__ */ new Set();
+    for (const dir of dirs) {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          runIds.add(entry.name);
+        }
+      }
+    }
+    const runs = await Promise.all(Array.from(runIds).map((runId) => this.readSummary(runId).catch(() => null)));
     return runs.filter((run) => run !== null).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async writeControl(runId, command) {
@@ -58605,7 +58853,7 @@ var RunStore = class {
     if (!name) {
       throw new Error("Saved workflow name must include a letter or number.");
     }
-    const workflowPath = path3.join(this.root, "workflows", `${name}.workflow.js`);
+    const workflowPath = path3.join(this.projectRoot, "workflows", `${name}.workflow.js`);
     const skillDir = path3.join(this.cwd, ".agents", "skills", name);
     const skillPath = path3.join(skillDir, "SKILL.md");
     await mkdir(path3.dirname(workflowPath), { recursive: true });
@@ -58672,7 +58920,7 @@ var createInitialSummary = (runId, definition, workflowPath, cwd2, options) => {
     phaseId: phase.id,
     title: `${phase.id}:${agent.title}`,
     prompt: agent.prompt,
-    model: resolveAgentModel(phase.id, agent, options),
+    model: resolveAgentModel2(phase.id, agent, options),
     reasoningEffort: agent.reasoningEffort ?? options.reasoningEffort,
     sandbox: agent.sandbox,
     status: "pending",
@@ -58689,6 +58937,9 @@ var createInitialSummary = (runId, definition, workflowPath, cwd2, options) => {
     description: definition.description,
     workflowPath,
     cwd: cwd2,
+    storageScope: options.storageScope,
+    storeRoot: options.storeRoot,
+    requestedAdapter: typeof options.adapter === "string" ? options.adapter : options.adapter?.name === "auto" || options.adapter?.name === "simulate" || options.adapter?.name === "exec" || options.adapter?.name === "sdk" ? options.adapter.name : void 0,
     status: "pending",
     createdAt,
     updatedAt: createdAt,
@@ -58706,7 +58957,7 @@ var createInitialSummary = (runId, definition, workflowPath, cwd2, options) => {
     }
   };
 };
-var resolveAgentModel = (phaseId, agent, options) => options.modelMap?.[`${phaseId}:${agent.id}`] ?? options.modelMap?.[agent.id] ?? options.modelMap?.[phaseId] ?? options.defaultModel ?? agent.model;
+var resolveAgentModel2 = (phaseId, agent, options) => options.modelMap?.[`${phaseId}:${agent.id}`] ?? options.modelMap?.[agent.id] ?? options.modelMap?.[phaseId] ?? options.defaultModel ?? agent.model;
 var buildWorkerPrompt = (definition, phaseId, agent, args, options) => {
   const payload = {
     workflow: definition.name,
@@ -58808,11 +59059,17 @@ var WorkflowRunner = class {
     const workflowPath = resolveWorkflowPath(cwd2, options.workflowPath);
     const loaded = await loadWorkflowDefinition(workflowPath);
     const runId = options.runId ?? createRunId(loaded.definition.name);
-    const adapter = typeof options.adapter === "string" || options.adapter === void 0 ? createWorkerAdapter(options.adapter ?? "simulate") : options.adapter;
+    await validateWorkflowModels(loaded.definition, {
+      adapter: typeof options.adapter === "string" ? options.adapter : options.adapter?.name ?? "auto",
+      defaultModel: options.defaultModel,
+      modelMap: options.modelMap
+    });
+    const adapter = typeof options.adapter === "string" || options.adapter === void 0 ? createWorkerAdapter(options.adapter ?? "auto") : options.adapter;
     let summary = options.resume ? await this.store.readSummary(runId) : createInitialSummary(runId, loaded.definition, workflowPath, cwd2, options);
     if (!options.resume) {
       await this.store.initRun(summary, loaded.definition, options.args ?? {}, loaded.source, {
         adapter: typeof options.adapter === "string" ? options.adapter : options.adapter?.name,
+        requestedAdapter: typeof options.adapter === "string" || options.adapter === void 0 ? options.adapter ?? "auto" : options.adapter?.name,
         defaultModel: options.defaultModel,
         reasoningEffort: options.reasoningEffort,
         modelMap: options.modelMap,
@@ -58950,8 +59207,9 @@ var WorkflowRunner = class {
         }
       })();
     }, 250);
+    let selectedAdapter = adapter.name === "auto" ? "" : adapter.name;
     try {
-      const model = resolveAgentModel(phaseId, agentDefinition, options);
+      const model = resolveAgentModel2(phaseId, agentDefinition, options);
       const workerSpec = {
         id: agentId,
         phaseId,
@@ -58976,11 +59234,27 @@ var WorkflowRunner = class {
 Previous output was invalid: ${validationError}
 Return valid JSON text only.`
         }, async (progress) => {
+          if (progress.actualAdapter && progress.actualAdapter !== selectedAdapter) {
+            selectedAdapter = progress.actualAdapter;
+            await this.store.appendEvent({
+              type: "adapter_selected",
+              runId: summary.id,
+              agentId,
+              at: nowIso(),
+              requestedAdapter: adapter.name === "auto" || adapter.name === "simulate" || adapter.name === "exec" || adapter.name === "sdk" ? adapter.name : "auto",
+              actualAdapter: progress.actualAdapter,
+              fallbackReason: progress.fallbackReason
+            });
+          }
           const current = await this.mutateSummary(summary.id, (draft) => {
+            if (progress.actualAdapter) {
+              draft.actualAdapter = progress.actualAdapter;
+            }
             draft.agents = draft.agents.map((agent) => agent.id === agentId ? {
               ...agent,
               tokens: progress.tokens ?? agent.tokens,
               tools: progress.tools ?? agent.tools,
+              actualAdapter: progress.actualAdapter ?? agent.actualAdapter,
               attempts: attempt
             } : agent);
           });
@@ -59005,6 +59279,18 @@ Return valid JSON text only.`
           }
         }, abortController.signal);
         lastRawOutput = result.output;
+        if (result.actualAdapter && result.actualAdapter !== selectedAdapter) {
+          selectedAdapter = result.actualAdapter;
+          await this.store.appendEvent({
+            type: "adapter_selected",
+            runId: next.id,
+            agentId,
+            at: nowIso(),
+            requestedAdapter: adapter.name === "auto" || adapter.name === "simulate" || adapter.name === "exec" || adapter.name === "sdk" ? adapter.name : "auto",
+            actualAdapter: result.actualAdapter,
+            fallbackReason: result.fallbackReason
+          });
+        }
         try {
           findings = parseAgentFindings(result.output, agentId, phaseId, model);
           break;
@@ -59025,6 +59311,9 @@ Return valid JSON text only.`
       }
       let completedAgent;
       next = await this.mutateSummary(summary.id, (current) => {
+        if (result.actualAdapter ?? selectedAdapter) {
+          current.actualAdapter = result.actualAdapter ?? selectedAdapter;
+        }
         current.agents = current.agents.map((agent) => {
           if (agent.id !== agentId) {
             return agent;
@@ -59035,6 +59324,7 @@ Return valid JSON text only.`
             tokens: result.tokens,
             tools: result.tools,
             elapsedMs: result.elapsedMs,
+            actualAdapter: result.actualAdapter ?? selectedAdapter ?? agent.actualAdapter,
             result: result.output,
             rawResult: result.output,
             findings,
@@ -59066,10 +59356,14 @@ Return valid JSON text only.`
       }
       const message = error51 instanceof Error ? error51.message : String(error51);
       next = await this.mutateSummary(summary.id, (current) => {
+        if (selectedAdapter) {
+          current.actualAdapter = selectedAdapter;
+        }
         current.agents = current.agents.map((agent) => agent.id === agentId ? {
           ...agent,
           status: cancelledByStopAgent ? "cancelled" : "failed",
           error: cancelledByStopAgent ? void 0 : message,
+          actualAdapter: selectedAdapter || agent.actualAdapter,
           rawResult: lastRawOutput || agent.rawResult,
           completedAt: nowIso()
         } : agent);
@@ -59132,6 +59426,8 @@ Return valid JSON text only.`
       `- Tokens: ${Math.round(summary.totals.tokens).toLocaleString()}`,
       `- Tools: ${summary.totals.tools.toLocaleString()}`,
       `- Models: ${Array.from(modelCounts.entries()).map(([model, count]) => `${model} (${count})`).join(", ")}`,
+      `- Requested adapter: ${summary.requestedAdapter ?? "auto"}`,
+      `- Actual adapter: ${summary.actualAdapter ?? "n/a"}`,
       `- Confirmed findings: ${confirmed.length}`,
       `- Needs human review: ${needsReview.length}`,
       `- False positives filtered: ${falsePositive.length}`,
@@ -59158,7 +59454,7 @@ Return valid JSON text only.`
     for (const phase of summary.phases) {
       lines.push(`### ${phase.title}`, "", `Status: ${phase.status}. Agents: ${phase.completedAgents}/${phase.totalAgents} completed, ${phase.failedAgents} failed.`, "");
       for (const agent of summary.agents.filter((item) => item.phaseId === phase.id)) {
-        lines.push(`#### ${agent.title}`, "", `- Status: ${agent.status}${agent.error ? ` (${agent.error})` : ""}`, `- Model: ${agent.model ?? "default"}`, `- Reasoning: ${agent.reasoningEffort ?? "default"}`, `- Tokens: ${Math.round(agent.tokens).toLocaleString()}`, `- Tools: ${agent.tools.toLocaleString()}`, "");
+        lines.push(`#### ${agent.title}`, "", `- Status: ${agent.status}${agent.error ? ` (${agent.error})` : ""}`, `- Model: ${agent.model ?? "default"}`, `- Adapter: ${agent.actualAdapter ?? "n/a"}`, `- Reasoning: ${agent.reasoningEffort ?? "default"}`, `- Tokens: ${Math.round(agent.tokens).toLocaleString()}`, `- Tools: ${agent.tools.toLocaleString()}`, "");
         if (agent.findings?.length) {
           for (const finding of agent.findings) {
             lines.push(`- [${finding.verdict}/${finding.severity}] ${finding.summary}`, `  Evidence: ${finding.evidence.join("; ")}`, finding.repro ? `  Repro: ${finding.repro}` : "", "");
@@ -59214,14 +59510,17 @@ Return valid JSON text only.`
   }
 };
 async function runWorkflow(options) {
-  const store = new RunStore(path4.resolve(options.cwd));
+  const store = new RunStore(path4.resolve(options.cwd), {
+    storageScope: options.storageScope,
+    storeRoot: options.storeRoot
+  });
   const runner = new WorkflowRunner(store);
   return runner.run(options);
 }
 
 // packages/cli/src/dashboard.tsx
 var import_react34 = __toESM(require_react(), 1);
-import { spawn as spawn3 } from "node:child_process";
+import { spawn as spawn4 } from "node:child_process";
 
 // packages/cli/src/format.ts
 var formatCount = (value) => {
@@ -59335,6 +59634,21 @@ function DashboardFrame({
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: summary.description }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Box_default, { justifyContent: "space-between", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Text, { color: summary.status === "failed" ? "red" : summary.status === "completed" ? "green" : "gray", children: [
+        summary.status,
+        summary.error ? ` \xB7 ${truncateMiddle(summary.error, Math.max(20, width - 72))}` : ""
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Text, { color: "gray", children: [
+        summary.requestedAdapter ?? "auto",
+        " \u2192 ",
+        summary.actualAdapter ?? "pending"
+      ] })
+    ] }),
+    summary.finalReportPath ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Text, { color: "gray", children: [
+      "Report: ",
+      truncateMiddle(summary.finalReportPath, width - 8)
+    ] }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Box_default, { marginTop: 1, borderStyle: "single", borderColor: "gray", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Box_default, { width: sidebarWidth, flexDirection: "column", borderStyle: "single", borderTop: false, borderBottom: false, borderLeft: false, children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { children: "Phases" }),
@@ -59416,8 +59730,19 @@ function DashboardFrame({
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", italic: true, children: "\u2191\u2193 select \xB7 \u2190\u2192 phase \xB7 j/k scroll \xB7 r restart agent \xB7 x stop \xB7 p pause/resume \xB7 s save \xB7 q quit" })
   ] });
 }
-function RunDashboard({ cwd: cwd2, runId, exitOnComplete = false, onExit }) {
-  const store = (0, import_react34.useMemo)(() => new RunStore(cwd2), [cwd2]);
+function RunDashboard({
+  cwd: cwd2,
+  runId,
+  storageScope = "codex-home",
+  storeRoot,
+  exitOnComplete = false,
+  onExit
+}) {
+  const resolvedStoreRoot = storeRoot ?? defaultStoreRoot(cwd2, storageScope);
+  const store = (0, import_react34.useMemo)(
+    () => new RunStore(cwd2, { storageScope, storeRoot: resolvedStoreRoot }),
+    [cwd2, resolvedStoreRoot, storageScope]
+  );
   const [summary, setSummary] = (0, import_react34.useState)(null);
   const [selectedPhaseId, setSelectedPhaseId] = (0, import_react34.useState)();
   const [selectedAgentId, setSelectedAgentId] = (0, import_react34.useState)();
@@ -59514,9 +59839,20 @@ function RunDashboard({ cwd: cwd2, runId, exitOnComplete = false, onExit }) {
       void store.saveRunAsWorkflow(runId, summary?.name ?? runId);
     }
     if (input === "r" && selectedAgentId) {
-      const child = spawn3(
+      const child = spawn4(
         process.execPath,
-        [process.argv[1] ?? "", "restart-agent", runId, selectedAgentId, "--cwd", cwd2],
+        [
+          process.argv[1] ?? "",
+          "restart-agent",
+          runId,
+          selectedAgentId,
+          "--cwd",
+          cwd2,
+          "--storage-scope",
+          storageScope,
+          "--store-root",
+          resolvedStoreRoot
+        ],
         { stdio: "ignore", detached: true }
       );
       child.unref();
@@ -59553,10 +59889,16 @@ var parseJson = (raw) => {
     throw new Error(`Invalid JSON args: ${message}`);
   }
 };
+var parseStorageScope = (raw) => {
+  if (raw === "codex-home" || raw === "project") {
+    return raw;
+  }
+  throw new Error(`Invalid storage scope: ${raw}. Expected codex-home or project.`);
+};
 var cliDir = path5.dirname(fileURLToPath(import.meta.url));
 var firstExistingPath = (candidates) => {
   for (const candidate of candidates) {
-    if (existsSync2(candidate)) {
+    if (existsSync3(candidate)) {
       return candidate;
     }
   }
@@ -59576,6 +59918,10 @@ var resolveCliWorkflowPath = (cwd2, workflow) => {
 };
 var decodeLaunch = (raw) => JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
 var program2 = new Command();
+var storeFor = (cwd2, storageScope = "codex-home", storeRoot) => new RunStore(cwd2, {
+  storageScope,
+  storeRoot: storeRoot ?? defaultStoreRoot(cwd2, storageScope)
+});
 program2.name("cwf").description("Codex workflow-as-code runtime").version("0.1.0");
 program2.command("__run-worker", { hidden: true }).argument("<launch>", "base64url encoded workflow launch").action(async (launch) => {
   const options = decodeLaunch(launch);
@@ -59590,11 +59936,12 @@ program2.command("validate").argument("[workflow]", "workflow script", "workflow
     process.exitCode = 1;
   }
 });
-program2.command("run").argument("[workflow]", "workflow script", "workflows/release-diff-review.workflow.js").option("--args <json>", "JSON args passed to the workflow", "{}").option("--adapter <name>", "worker adapter: simulate, exec, sdk", "simulate").option("--model <model>", "default model for subagents").option("--reasoning <effort>", "default reasoning effort for subagents").option(
+program2.command("run").argument("[workflow]", "workflow script", "workflows/release-diff-review.workflow.js").option("--args <json>", "JSON args passed to the workflow", "{}").option("--adapter <name>", "worker adapter: auto, simulate, exec, sdk", "auto").option("--model <model>", "default model for subagents").option("--reasoning <effort>", "default reasoning effort for subagents").option(
   "--model-map <json>",
   "JSON object mapping phase id, agent id, or phase:agent id to model"
-).option("--prompt-suffix <text>", "extra instruction appended to every worker prompt").option("--cwd <path>", "working directory", process.cwd()).option("--watch", "watch the run in the terminal dashboard", true).option("--no-watch", "do not open the terminal dashboard").option("--resume", "resume an existing run id instead of starting fresh").option("--run-id <runId>", "explicit run id for resume/background integrations").action(async (workflow, options) => {
+).option("--prompt-suffix <text>", "extra instruction appended to every worker prompt").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").option("--watch", "watch the run in the terminal dashboard", true).option("--no-watch", "do not open the terminal dashboard").option("--resume", "resume an existing run id instead of starting fresh").option("--run-id <runId>", "explicit run id for resume/background integrations").action(async (workflow, options) => {
   const cwd2 = path5.resolve(options.cwd);
+  const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd2, options.storageScope);
   const workflowPath = resolveCliWorkflowPath(cwd2, workflow);
   const loaded = await loadWorkflowDefinition(workflowPath);
   const runId = options.runId ?? createRunId(loaded.definition.name);
@@ -59608,10 +59955,12 @@ program2.command("run").argument("[workflow]", "workflow script", "workflows/rel
     reasoningEffort: options.reasoning,
     modelMap: options.modelMap ? parseJson(options.modelMap) : void 0,
     promptSuffix: options.promptSuffix,
+    storageScope: options.storageScope,
+    storeRoot,
     resume: options.resume
   });
   if (options.watch) {
-    const app = render_default(/* @__PURE__ */ (0, import_jsx_runtime2.jsx)(RunDashboard, { cwd: cwd2, runId, exitOnComplete: true, onExit: () => app.unmount() }));
+    const app = render_default(/* @__PURE__ */ (0, import_jsx_runtime2.jsx)(RunDashboard, { cwd: cwd2, runId, storageScope: options.storageScope, storeRoot, exitOnComplete: true, onExit: () => app.unmount() }));
     await done.catch(() => void 0);
     await app.waitUntilExit();
   } else {
@@ -59619,14 +59968,14 @@ program2.command("run").argument("[workflow]", "workflow script", "workflows/rel
     console.log(summary.id);
   }
 });
-program2.command("watch").argument("<run-id>").option("--cwd <path>", "working directory", process.cwd()).action(async (runId, options) => {
+program2.command("watch").argument("<run-id>").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (runId, options) => {
   const cwd2 = path5.resolve(options.cwd);
-  const app = render_default(/* @__PURE__ */ (0, import_jsx_runtime2.jsx)(RunDashboard, { cwd: cwd2, runId, onExit: () => app.unmount() }));
+  const app = render_default(/* @__PURE__ */ (0, import_jsx_runtime2.jsx)(RunDashboard, { cwd: cwd2, runId, storageScope: options.storageScope, storeRoot: options.storeRoot, onExit: () => app.unmount() }));
   await app.waitUntilExit();
 });
-program2.command("workflows").description("list built-in and saved workflows").option("--cwd <path>", "working directory", process.cwd()).action(async (options) => {
+program2.command("workflows").description("list built-in and saved workflows").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (options) => {
   const cwd2 = path5.resolve(options.cwd);
-  const store = new RunStore(cwd2);
+  const store = storeFor(cwd2, options.storageScope, options.storeRoot);
   const runs = await store.listRuns();
   console.log("Built-in workflows:");
   console.log("  workflows/bug-sweep.workflow.js");
@@ -59639,15 +59988,17 @@ program2.command("workflows").description("list built-in and saved workflows").o
   }
 });
 var controlCommand = (name) => {
-  program2.command(name).argument("<run-id>").option("--cwd <path>", "working directory", process.cwd()).action(async (runId, options) => {
-    const store = new RunStore(path5.resolve(options.cwd));
+  program2.command(name).argument("<run-id>").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (runId, options) => {
+    const cwd2 = path5.resolve(options.cwd);
+    const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd2, options.storageScope);
+    const store = storeFor(cwd2, options.storageScope, storeRoot);
     await store.writeControl(runId, { type: name, at: nowIso() });
     if (name === "resume") {
       const summary = await store.readSummary(runId);
       if (["completed", "failed", "stopped"].includes(summary.status)) {
         const manifest = await store.readManifest(runId);
         await runWorkflow({
-          cwd: path5.resolve(options.cwd),
+          cwd: cwd2,
           workflowPath: summary.workflowPath,
           args: manifest.args,
           adapter: typeof manifest.launch?.adapter === "string" ? manifest.launch.adapter : void 0,
@@ -59656,6 +60007,8 @@ var controlCommand = (name) => {
           reasoningEffort: typeof manifest.launch?.reasoningEffort === "string" ? manifest.launch.reasoningEffort : void 0,
           modelMap: typeof manifest.launch?.modelMap === "object" && manifest.launch.modelMap !== null ? manifest.launch.modelMap : void 0,
           promptSuffix: typeof manifest.launch?.promptSuffix === "string" ? manifest.launch.promptSuffix : void 0,
+          storageScope: options.storageScope,
+          storeRoot,
           resume: true
         });
       }
@@ -59666,14 +60019,15 @@ var controlCommand = (name) => {
 controlCommand("pause");
 controlCommand("resume");
 controlCommand("stop");
-program2.command("stop-agent").argument("<run-id>").argument("<agent-id>").option("--cwd <path>", "working directory", process.cwd()).action(async (runId, agentId, options) => {
-  const store = new RunStore(path5.resolve(options.cwd));
+program2.command("stop-agent").argument("<run-id>").argument("<agent-id>").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (runId, agentId, options) => {
+  const store = storeFor(path5.resolve(options.cwd), options.storageScope, options.storeRoot);
   await store.writeControl(runId, { type: "stop-agent", at: nowIso(), agentId });
   console.log(`stop requested for ${agentId} in ${runId}`);
 });
-program2.command("restart-agent").argument("<run-id>").argument("<agent-id>").option("--cwd <path>", "working directory", process.cwd()).action(async (runId, agentId, options) => {
+program2.command("restart-agent").argument("<run-id>").argument("<agent-id>").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (runId, agentId, options) => {
   const cwd2 = path5.resolve(options.cwd);
-  const store = new RunStore(cwd2);
+  const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd2, options.storageScope);
+  const store = storeFor(cwd2, options.storageScope, storeRoot);
   const summary = await store.markAgentForRestart(runId, agentId);
   const manifest = await store.readManifest(runId);
   await runWorkflow({
@@ -59686,19 +60040,26 @@ program2.command("restart-agent").argument("<run-id>").argument("<agent-id>").op
     reasoningEffort: typeof manifest.launch?.reasoningEffort === "string" ? manifest.launch.reasoningEffort : void 0,
     modelMap: typeof manifest.launch?.modelMap === "object" && manifest.launch.modelMap !== null ? manifest.launch.modelMap : void 0,
     promptSuffix: typeof manifest.launch?.promptSuffix === "string" ? manifest.launch.promptSuffix : void 0,
+    storageScope: options.storageScope,
+    storeRoot,
     resume: true
   });
   await store.writeControl(runId, { type: "restart-agent", at: nowIso(), agentId });
   console.log(`restarted ${agentId} in ${runId}`);
 });
-program2.command("save").argument("<run-id>").requiredOption("--name <name>", "saved workflow name").option("--cwd <path>", "working directory", process.cwd()).action(async (runId, options) => {
-  const store = new RunStore(path5.resolve(options.cwd));
+program2.command("save").argument("<run-id>").requiredOption("--name <name>", "saved workflow name").option("--cwd <path>", "working directory", process.cwd()).option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home").option("--store-root <path>", "explicit workflow run storage root").action(async (runId, options) => {
+  const store = storeFor(path5.resolve(options.cwd), options.storageScope, options.storeRoot);
   const saved = await store.saveRunAsWorkflow(runId, options.name);
   console.log(`Saved ${saved.name}`);
   console.log(`Workflow: ${saved.workflowPath}`);
   console.log(`Skill: ${saved.skillPath}`);
 });
-await program2.parseAsync(process.argv);
+try {
+  await program2.parseAsync(process.argv);
+} catch (error51) {
+  console.error(error51 instanceof Error ? error51.message : String(error51));
+  process.exitCode = 1;
+}
 /*! Bundled license information:
 
 react/cjs/react.production.js:

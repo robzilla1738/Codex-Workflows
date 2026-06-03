@@ -6,13 +6,14 @@ import { Command } from "commander";
 import { render } from "ink";
 import {
   createRunId,
+  defaultStoreRoot,
   loadWorkflowDefinition,
   nowIso,
   runWorkflow,
   RunStore,
   validateWorkflowDefinition
 } from "@codex-workflows/runtime";
-import type { ReasoningEffort } from "@codex-workflows/schemas";
+import type { ReasoningEffort, StorageScope } from "@codex-workflows/schemas";
 import { RunDashboard } from "./dashboard.js";
 
 const parseJson = (raw: string) => {
@@ -22,6 +23,13 @@ const parseJson = (raw: string) => {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid JSON args: ${message}`);
   }
+};
+
+const parseStorageScope = (raw: string): StorageScope => {
+  if (raw === "codex-home" || raw === "project") {
+    return raw;
+  }
+  throw new Error(`Invalid storage scope: ${raw}. Expected codex-home or project.`);
 };
 
 const cliDir = path.dirname(fileURLToPath(import.meta.url));
@@ -59,12 +67,20 @@ interface WorkerLaunch {
   modelMap?: Record<string, string>;
   promptSuffix?: string;
   resume?: boolean;
+  storageScope?: StorageScope;
+  storeRoot?: string;
 }
 
 const decodeLaunch = (raw: string) =>
   JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as WorkerLaunch;
 
 const program = new Command();
+
+const storeFor = (cwd: string, storageScope: StorageScope = "codex-home", storeRoot?: string) =>
+  new RunStore(cwd, {
+    storageScope,
+    storeRoot: storeRoot ?? defaultStoreRoot(cwd, storageScope)
+  });
 
 program
   .name("cwf")
@@ -97,7 +113,7 @@ program
   .command("run")
   .argument("[workflow]", "workflow script", "workflows/release-diff-review.workflow.js")
   .option("--args <json>", "JSON args passed to the workflow", "{}")
-  .option("--adapter <name>", "worker adapter: simulate, exec, sdk", "simulate")
+  .option("--adapter <name>", "worker adapter: auto, simulate, exec, sdk", "auto")
   .option("--model <model>", "default model for subagents")
   .option("--reasoning <effort>", "default reasoning effort for subagents")
   .option(
@@ -106,12 +122,15 @@ program
   )
   .option("--prompt-suffix <text>", "extra instruction appended to every worker prompt")
   .option("--cwd <path>", "working directory", process.cwd())
+  .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+  .option("--store-root <path>", "explicit workflow run storage root")
   .option("--watch", "watch the run in the terminal dashboard", true)
   .option("--no-watch", "do not open the terminal dashboard")
   .option("--resume", "resume an existing run id instead of starting fresh")
   .option("--run-id <runId>", "explicit run id for resume/background integrations")
-  .action(async (workflow: string, options: { args: string; adapter: string; model?: string; reasoning?: string; modelMap?: string; promptSuffix?: string; cwd: string; watch: boolean; resume?: boolean; runId?: string }) => {
+  .action(async (workflow: string, options: { args: string; adapter: string; model?: string; reasoning?: string; modelMap?: string; promptSuffix?: string; cwd: string; storageScope: StorageScope; storeRoot?: string; watch: boolean; resume?: boolean; runId?: string }) => {
     const cwd = path.resolve(options.cwd);
+    const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd, options.storageScope);
     const workflowPath = resolveCliWorkflowPath(cwd, workflow);
     const loaded = await loadWorkflowDefinition(workflowPath);
     const runId = options.runId ?? createRunId(loaded.definition.name);
@@ -125,11 +144,13 @@ program
       reasoningEffort: options.reasoning as never,
       modelMap: options.modelMap ? (parseJson(options.modelMap) as Record<string, string>) : undefined,
       promptSuffix: options.promptSuffix,
+      storageScope: options.storageScope,
+      storeRoot,
       resume: options.resume
     });
 
     if (options.watch) {
-      const app = render(<RunDashboard cwd={cwd} runId={runId} exitOnComplete onExit={() => app.unmount()} />);
+      const app = render(<RunDashboard cwd={cwd} runId={runId} storageScope={options.storageScope} storeRoot={storeRoot} exitOnComplete onExit={() => app.unmount()} />);
       await done.catch(() => undefined);
       await app.waitUntilExit();
     } else {
@@ -142,9 +163,11 @@ program
   .command("watch")
   .argument("<run-id>")
   .option("--cwd <path>", "working directory", process.cwd())
-  .action(async (runId: string, options: { cwd: string }) => {
+  .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+  .option("--store-root <path>", "explicit workflow run storage root")
+  .action(async (runId: string, options: { cwd: string; storageScope: StorageScope; storeRoot?: string }) => {
     const cwd = path.resolve(options.cwd);
-    const app = render(<RunDashboard cwd={cwd} runId={runId} onExit={() => app.unmount()} />);
+    const app = render(<RunDashboard cwd={cwd} runId={runId} storageScope={options.storageScope} storeRoot={options.storeRoot} onExit={() => app.unmount()} />);
     await app.waitUntilExit();
   });
 
@@ -152,9 +175,11 @@ program
   .command("workflows")
   .description("list built-in and saved workflows")
   .option("--cwd <path>", "working directory", process.cwd())
-  .action(async (options: { cwd: string }) => {
+  .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+  .option("--store-root <path>", "explicit workflow run storage root")
+  .action(async (options: { cwd: string; storageScope: StorageScope; storeRoot?: string }) => {
     const cwd = path.resolve(options.cwd);
-    const store = new RunStore(cwd);
+    const store = storeFor(cwd, options.storageScope, options.storeRoot);
     const runs = await store.listRuns();
     console.log("Built-in workflows:");
     console.log("  workflows/bug-sweep.workflow.js");
@@ -172,15 +197,19 @@ const controlCommand = (name: "pause" | "resume" | "stop") => {
     .command(name)
     .argument("<run-id>")
     .option("--cwd <path>", "working directory", process.cwd())
-    .action(async (runId: string, options: { cwd: string }) => {
-      const store = new RunStore(path.resolve(options.cwd));
+    .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+    .option("--store-root <path>", "explicit workflow run storage root")
+    .action(async (runId: string, options: { cwd: string; storageScope: StorageScope; storeRoot?: string }) => {
+      const cwd = path.resolve(options.cwd);
+      const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd, options.storageScope);
+      const store = storeFor(cwd, options.storageScope, storeRoot);
       await store.writeControl(runId, { type: name, at: nowIso() });
       if (name === "resume") {
         const summary = await store.readSummary(runId);
         if (["completed", "failed", "stopped"].includes(summary.status)) {
           const manifest = await store.readManifest(runId);
           await runWorkflow({
-            cwd: path.resolve(options.cwd),
+            cwd,
             workflowPath: summary.workflowPath,
             args: manifest.args,
             adapter:
@@ -204,6 +233,8 @@ const controlCommand = (name: "pause" | "resume" | "stop") => {
               typeof manifest.launch?.promptSuffix === "string"
                 ? manifest.launch.promptSuffix
                 : undefined,
+            storageScope: options.storageScope,
+            storeRoot,
             resume: true
           });
         }
@@ -221,8 +252,10 @@ program
   .argument("<run-id>")
   .argument("<agent-id>")
   .option("--cwd <path>", "working directory", process.cwd())
-  .action(async (runId: string, agentId: string, options: { cwd: string }) => {
-    const store = new RunStore(path.resolve(options.cwd));
+  .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+  .option("--store-root <path>", "explicit workflow run storage root")
+  .action(async (runId: string, agentId: string, options: { cwd: string; storageScope: StorageScope; storeRoot?: string }) => {
+    const store = storeFor(path.resolve(options.cwd), options.storageScope, options.storeRoot);
     await store.writeControl(runId, { type: "stop-agent", at: nowIso(), agentId });
     console.log(`stop requested for ${agentId} in ${runId}`);
   });
@@ -232,9 +265,12 @@ program
   .argument("<run-id>")
   .argument("<agent-id>")
   .option("--cwd <path>", "working directory", process.cwd())
-  .action(async (runId: string, agentId: string, options: { cwd: string }) => {
+  .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+  .option("--store-root <path>", "explicit workflow run storage root")
+  .action(async (runId: string, agentId: string, options: { cwd: string; storageScope: StorageScope; storeRoot?: string }) => {
     const cwd = path.resolve(options.cwd);
-    const store = new RunStore(cwd);
+    const storeRoot = options.storeRoot ?? defaultStoreRoot(cwd, options.storageScope);
+    const store = storeFor(cwd, options.storageScope, storeRoot);
     const summary = await store.markAgentForRestart(runId, agentId);
     const manifest = await store.readManifest(runId);
     await runWorkflow({
@@ -259,6 +295,8 @@ program
         typeof manifest.launch?.promptSuffix === "string"
           ? manifest.launch.promptSuffix
           : undefined,
+      storageScope: options.storageScope,
+      storeRoot,
       resume: true
     });
     await store.writeControl(runId, { type: "restart-agent", at: nowIso(), agentId });
@@ -270,12 +308,19 @@ program
   .argument("<run-id>")
   .requiredOption("--name <name>", "saved workflow name")
   .option("--cwd <path>", "working directory", process.cwd())
-  .action(async (runId: string, options: { name: string; cwd: string }) => {
-    const store = new RunStore(path.resolve(options.cwd));
+  .option("--storage-scope <scope>", "run storage: codex-home or project", parseStorageScope, "codex-home")
+  .option("--store-root <path>", "explicit workflow run storage root")
+  .action(async (runId: string, options: { name: string; cwd: string; storageScope: StorageScope; storeRoot?: string }) => {
+    const store = storeFor(path.resolve(options.cwd), options.storageScope, options.storeRoot);
     const saved = await store.saveRunAsWorkflow(runId, options.name);
     console.log(`Saved ${saved.name}`);
     console.log(`Workflow: ${saved.workflowPath}`);
     console.log(`Skill: ${saved.skillPath}`);
   });
 
-await program.parseAsync(process.argv);
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}
