@@ -267,7 +267,7 @@ Repository name: `Codex-Workflows`
 
 Tagline: "Workflow-as-code orchestration for Codex."
 
-License: Apache-2.0 or MIT. Apache-2.0 is better if we expect broad corporate use and want explicit patent language.
+License: MIT.
 
 Do not market it as an Anthropic or Claude compatibility layer. The honest positioning is:
 

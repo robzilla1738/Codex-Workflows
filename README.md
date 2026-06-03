@@ -1,7 +1,7 @@
 # Codex Workflows
 
 [![CI](https://github.com/robzilla1738/Codex-Workflows/actions/workflows/ci.yml/badge.svg)](https://github.com/robzilla1738/Codex-Workflows/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Buy me a coffee](https://img.shields.io/badge/support-Buy%20me%20a%20coffee-ffdd00?logo=buymeacoffee&logoColor=000)](https://www.buymeacoffee.com/robcourson)
 
 Claude Code has workflows. Codex has subagents, skills, plugins, and MCP.

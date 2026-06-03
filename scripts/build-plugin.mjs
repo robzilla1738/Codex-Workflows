@@ -87,7 +87,7 @@ await writeFile(
       author: {
         name: "Robert Courson"
       },
-      license: "Apache-2.0",
+      license: "MIT",
       repository: "https://github.com/robzilla1738/Codex-Workflows",
       skills: "./skills/",
       mcpServers: "./.mcp.json",
@@ -139,7 +139,7 @@ await writeFile(
       version: packageJson.version,
       private: true,
       type: "module",
-      license: "Apache-2.0"
+      license: "MIT"
     },
     null,
     2

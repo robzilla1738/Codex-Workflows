@@ -67,8 +67,8 @@ if (manifest) {
   if (manifest.skills !== "./skills/") {
     errors.push("plugin.json skills must point to ./skills/");
   }
-  if (manifest.license !== "Apache-2.0") {
-    errors.push("plugin.json license must be Apache-2.0");
+  if (manifest.license !== "MIT") {
+    errors.push("plugin.json license must be MIT");
   }
 }
 

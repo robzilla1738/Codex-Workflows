@@ -5,7 +5,7 @@
   "author": {
     "name": "Robert Courson"
   },
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": "https://github.com/robzilla1738/Codex-Workflows",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
