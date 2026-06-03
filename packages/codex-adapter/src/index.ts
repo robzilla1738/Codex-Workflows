@@ -187,7 +187,8 @@ export class CodexExecAdapter implements WorkerAdapter {
       "-c",
       'approval_policy="never"',
       "--cd",
-      spec.cwd
+      spec.cwd,
+      "--skip-git-repo-check"
     ];
     if (spec.model) {
       args.push("--model", spec.model);

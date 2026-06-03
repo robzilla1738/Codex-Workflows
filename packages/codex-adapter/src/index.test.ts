@@ -50,6 +50,7 @@ describe("SimulatedCodexAdapter", () => {
       fakeCodex,
       [
         "#!/bin/sh",
+        "case \" $* \" in *\" --skip-git-repo-check \"*) ;; *) echo 'missing --skip-git-repo-check' >&2; exit 2 ;; esac",
         "echo 'Reading additional input from stdin...' >&2",
         "echo '{\"type\":\"error\",\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"The model is unsupported\\\"}}\"}'",
         "echo '{\"type\":\"turn.failed\",\"error\":{\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"The model is unsupported\\\"}}\"}}'",
