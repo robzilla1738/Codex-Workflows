@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "codex-workflows": {
+      "command": "node",
+      "args": [
+        "dist/mcp-server.js"
+      ],
+      "cwd": ".",
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 600
+    }
+  }
+}

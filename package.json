@@ -1,0 +1,32 @@
+{
+  "name": "codex-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/robzilla1738/Codex-Workflows.git"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "pnpm -r --sort build",
+    "clean": "find packages -name dist -type d -prune -exec rm -rf {} +",
+    "cwf": "tsx packages/cli/src/index.tsx",
+    "mcp": "tsx packages/mcp-server/src/index.ts",
+    "plugin:build": "pnpm build && node scripts/build-plugin.mjs",
+    "plugin:validate": "node scripts/validate-plugin.mjs",
+    "test": "vitest run",
+    "typecheck": "pnpm build && pnpm -r --sort typecheck",
+    "validate:plugin": "pnpm plugin:build && pnpm plugin:validate"
+  },
+  "devDependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.28.0",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  }
+}

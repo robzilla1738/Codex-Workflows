@@ -1,0 +1,26 @@
+{
+  "name": "codex-workflows",
+  "version": "0.1.0",
+  "description": "Workflow-as-code orchestration for Codex.",
+  "author": {
+    "name": "Robert Courson"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/robzilla1738/Codex-Workflows",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Workflows",
+    "shortDescription": "Run Claude-style dynamic workflows in Codex.",
+    "longDescription": "Codex Workflows runs JavaScript workflow definitions, starts Codex workers, exposes MCP tools, and opens a live terminal dashboard for multi-agent review work.",
+    "developerName": "Robert Courson",
+    "category": "Productivity",
+    "capabilities": [
+      "workflow orchestration",
+      "multi-agent fanout",
+      "terminal dashboard",
+      "MCP tools"
+    ],
+    "defaultPrompt": "Use codex-workflows to run a workflow."
+  }
+}

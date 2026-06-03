@@ -1,0 +1,10 @@
+node_modules/
+dist/
+!plugins/codex-workflows/dist/
+!plugins/codex-workflows/dist/**
+coverage/
+.turbo/
+.codex-workflows/runs/
+.codex-workflows/tmp/
+*.tsbuildinfo
+.DS_Store

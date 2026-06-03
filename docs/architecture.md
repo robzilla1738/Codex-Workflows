@@ -1,0 +1,63 @@
+# Architecture
+
+Codex Workflows has two jobs:
+
+1. Let Codex start and inspect durable workflow runs through MCP.
+2. Give users a terminal dashboard that feels close to Claude Code workflows.
+
+The code is split so those two jobs do not get tangled.
+
+## Packages
+
+- `@codex-workflows/schemas`: Zod schemas and TypeScript types for workflows,
+  runs, agents, phases, events, and controls.
+- `@codex-workflows/codex-adapter`: workers for simulated runs, `codex exec
+  --json`, and the Codex SDK.
+- `@codex-workflows/runtime`: workflow loading, QuickJS validation, scheduling,
+  events, checkpoints, saved workflows, and final reports.
+- `@codex-workflows/cli`: the `cwf` command and Ink dashboard.
+- `@codex-workflows/mcp-server`: MCP tools Codex calls from the plugin.
+
+## Run state
+
+Every run writes to `.codex-workflows/runs/<run-id>/`:
+
+- `manifest.json`: workflow definition, args, and launch options.
+- `status.json`: current summary for the TUI and MCP status calls.
+- `events.jsonl`: append-only event history.
+- `control.json`: pause, resume, stop, stop-agent, or restart-agent requests.
+- `agents/<agent-id>/`: worker prompt and result files.
+- `final.md`: final report.
+
+The dashboard reads `status.json` and `events.jsonl`, so it can attach to a run
+started by either the CLI or MCP server.
+
+MCP launches use a detached worker process. That matters: a workflow should keep
+running if the Codex thread disconnects or the MCP request finishes.
+
+## Resume and restart
+
+Completed agent results are cached in `status.json` and
+`agents/<agent-id>/result.json`.
+
+Resume skips completed agents and reruns work that is pending, failed,
+cancelled, or explicitly restarted. `restart-agent` marks one agent pending and
+relaunches the workflow in resume mode.
+
+## Workflow scripts
+
+Workflow scripts are loaded in QuickJS. The script can define workflow metadata,
+phases, and agent prompts. It does not get Node globals, direct filesystem
+access, shell access, network access, process env, or dynamic imports.
+
+Actual code review work happens in Codex worker adapters, under explicit sandbox
+and approval settings.
+
+## Generated plugin
+
+`pnpm validate:plugin` builds the TypeScript packages, bundles the CLI and MCP
+server into `plugins/codex-workflows/dist`, copies the built-in workflows and
+skill, and validates the final plugin shape.
+
+The generated plugin is committed so a GitHub marketplace install works without
+asking users to build anything locally.

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build distributable plugin
+        run: pnpm plugin:build
+
+      - name: Validate distributable plugin
+        run: pnpm plugin:validate
+
+      - name: Smoke generated plugin CLI
+        run: |
+          node plugins/codex-workflows/dist/cli.js validate workflows/bug-sweep.workflow.js --cwd /tmp
+          node plugins/codex-workflows/dist/cli.js run workflows/bug-sweep.workflow.js --cwd /tmp --adapter simulate --no-watch

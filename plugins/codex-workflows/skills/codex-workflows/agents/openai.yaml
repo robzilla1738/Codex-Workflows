@@ -1,0 +1,12 @@
+interface:
+  display_name: "Codex Workflows"
+  short_description: "Run dynamic multi-agent workflows with a terminal dashboard."
+  brand_color: "#8EA2FF"
+  default_prompt: "Use codex-workflows to run the release diff review workflow."
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "codex-workflows"
+      description: "Local MCP server for workflow runs, events, and controls."
