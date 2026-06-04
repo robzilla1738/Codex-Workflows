@@ -64,4 +64,21 @@ describe("schemas", () => {
       }).type
     ).toBe("run_started");
   });
+
+  it("validates agent activity events", () => {
+    const parsed = WorkflowEventSchema.parse({
+      type: "agent_tool_event",
+      runId: "run_1",
+      agentId: "find:a",
+      at: new Date(0).toISOString(),
+      kind: "command",
+      text: "started: command rg --files"
+    });
+
+    expect(parsed.type).toBe("agent_tool_event");
+    if (parsed.type !== "agent_tool_event") {
+      throw new Error("expected agent_tool_event");
+    }
+    expect(parsed.kind).toBe("command");
+  });
 });

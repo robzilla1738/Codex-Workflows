@@ -43,8 +43,10 @@ from Codex or from the CLI.
 - `release-diff-review`: release-blocker review against a branch or diff.
 - `security-auth-review`: auth, permission, injection, secret, sandbox, and MCP
   boundary review.
-- Live dashboard with phases, agent rows, token/tool/time metrics, detail view,
-  pause/resume/stop/restart/save controls, and final report path.
+- Live dashboard with phases, agent rows, token/tool/time metrics, recent
+  worker activity, detail view, pause/resume/stop/restart/save controls, and
+  final report path. Token totals show as pending until Codex emits usage
+  metadata; command/tool/message/stderr activity updates as events arrive.
 - Workflow definitions can explicitly request up to 64 concurrent workers and
   2000 total agents.
 - Durable run state under `${CODEX_HOME:-~/.codex}/codex-workflows/projects/<project-hash>/runs/<run-id>/`

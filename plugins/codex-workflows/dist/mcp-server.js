@@ -32765,6 +32765,23 @@ var AgentFindingSchema = external_exports.object({
   phaseId: external_exports.string(),
   details: external_exports.string().optional()
 });
+var AgentActivityKindSchema = external_exports.enum([
+  "adapter",
+  "command",
+  "error",
+  "event",
+  "file",
+  "message",
+  "stderr",
+  "stdout",
+  "token",
+  "tool"
+]);
+var AgentActivitySchema = external_exports.object({
+  at: external_exports.string(),
+  kind: AgentActivityKindSchema,
+  text: external_exports.string().min(1)
+});
 var AgentDefinitionSchema = external_exports.object({
   id: external_exports.string().min(1),
   title: external_exports.string().min(1),
@@ -32821,7 +32838,8 @@ var AgentSummarySchema = external_exports.object({
   startedAt: external_exports.string().optional(),
   completedAt: external_exports.string().optional(),
   lastActivityAt: external_exports.string().optional(),
-  lastMessage: external_exports.string().optional()
+  lastMessage: external_exports.string().optional(),
+  activity: external_exports.array(AgentActivitySchema).optional()
 });
 var RunTotalsSchema = external_exports.object({
   totalAgents: external_exports.number().int().nonnegative(),
@@ -32906,7 +32924,8 @@ var WorkflowEventSchema = external_exports.discriminatedUnion("type", [
     at: external_exports.string(),
     tokens: external_exports.number().nonnegative().optional(),
     tools: external_exports.number().int().nonnegative().optional(),
-    message: external_exports.string().optional()
+    message: external_exports.string().optional(),
+    activity: external_exports.array(AgentActivitySchema).optional()
   }),
   external_exports.object({
     type: external_exports.literal("agent_completed"),
@@ -32931,7 +32950,7 @@ var WorkflowEventSchema = external_exports.discriminatedUnion("type", [
     runId: external_exports.string(),
     agentId: external_exports.string(),
     at: external_exports.string(),
-    kind: external_exports.enum(["tool", "stdout", "stderr", "file", "message"]),
+    kind: AgentActivityKindSchema,
     text: external_exports.string()
   }),
   external_exports.object({
@@ -33385,7 +33404,11 @@ var RunStore = class {
       error: error51,
       completedAt: at,
       lastActivityAt: at,
-      lastMessage: "runner orphaned"
+      lastMessage: "runner orphaned",
+      activity: [
+        ...agent.activity ?? [],
+        { at, kind: "error", text: "runner orphaned" }
+      ].slice(-8)
     } : agent);
     next.phases = next.phases.map((phase) => phase.status === "running" || phase.status === "paused" ? {
       ...phase,
@@ -33484,6 +33507,7 @@ var RunStore = class {
       startedAt: void 0,
       lastActivityAt: void 0,
       lastMessage: void 0,
+      activity: [],
       tokens: 0,
       tools: 0,
       elapsedMs: 0,

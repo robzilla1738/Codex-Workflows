@@ -59,6 +59,9 @@ describe("runWorkflow", () => {
     expect(summary.totals.completedAgents).toBe(2);
     expect(summary.totals.tokens).toBe(30);
     expect(summary.agents[0]?.findings?.[0]?.verdict).toBe("needs-human-review");
+    expect(summary.agents[0]?.activity?.some((item) => item.text.includes("simulated step"))).toBe(
+      true
+    );
   });
 
   it("lets caller model controls override workflow agent defaults", async () => {

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { ReasoningEffort, SandboxMode } from "@codex-workflows/schemas";
+import type { AgentActivityKind, ReasoningEffort, SandboxMode } from "@codex-workflows/schemas";
 
 export interface WorkerSpec {
   id: string;
@@ -19,8 +19,14 @@ export interface WorkerProgress {
   tokens?: number;
   tools?: number;
   message?: string;
+  activity?: WorkerActivity | WorkerActivity[];
   actualAdapter?: string;
   fallbackReason?: string;
+}
+
+export interface WorkerActivity {
+  kind: AgentActivityKind;
+  text: string;
 }
 
 export interface WorkerResult {
@@ -36,7 +42,7 @@ export interface WorkerAdapter {
   readonly name: string;
   runWorker(
     spec: WorkerSpec,
-    onProgress: (progress: WorkerProgress) => void,
+    onProgress: (progress: WorkerProgress) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<WorkerResult>;
 }
@@ -65,7 +71,7 @@ export class SimulatedCodexAdapter implements WorkerAdapter {
 
   async runWorker(
     spec: WorkerSpec,
-    onProgress: (progress: WorkerProgress) => void,
+    onProgress: (progress: WorkerProgress) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<WorkerResult> {
     const started = Date.now();
@@ -76,10 +82,14 @@ export class SimulatedCodexAdapter implements WorkerAdapter {
 
     for (let step = 1; step <= steps; step += 1) {
       await sleep(durationMs / steps, signal);
-      onProgress({
+      await onProgress({
         tokens: Math.round((targetTokens * step) / steps),
         tools: Math.round((targetTools * step) / steps),
-        message: `${spec.title}: step ${step}/${steps}`
+        message: `${spec.title}: step ${step}/${steps}`,
+        activity: {
+          kind: "event",
+          text: `${spec.title}: simulated step ${step}/${steps}`
+        }
       });
     }
 
@@ -169,12 +179,133 @@ const normalizeCodexError = (raw: string) => {
   return message;
 };
 
+const preview = (value: unknown, max = 280) => {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  const text =
+    typeof value === "string"
+      ? value
+      : typeof value === "number" || typeof value === "boolean"
+        ? String(value)
+        : JSON.stringify(value);
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+};
+
+const firstString = (record: Record<string, unknown>, keys: string[]) => {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return undefined;
+};
+
+const commandText = (item: Record<string, unknown>) => {
+  const direct = firstString(item, ["command", "cmd", "shellCommand", "input"]);
+  if (direct) {
+    return direct;
+  }
+  const command = item.command;
+  if (typeof command === "string") {
+    return command;
+  }
+  if (command && typeof command === "object") {
+    return firstString(command as Record<string, unknown>, ["command", "cmd", "program", "shell"]);
+  }
+  return undefined;
+};
+
+const itemDetail = (item: Record<string, unknown>) => {
+  const itemType = typeof item.type === "string" ? item.type : "item";
+  if (itemType === "command_execution") {
+    const command = commandText(item);
+    const status = firstString(item, ["status", "state"]);
+    const exitCode =
+      typeof item.exit_code === "number"
+        ? `exit ${item.exit_code}`
+        : typeof item.exitCode === "number"
+          ? `exit ${item.exitCode}`
+          : undefined;
+    return [command ? `command ${preview(command)}` : "command_execution", status, exitCode]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (itemType === "mcp_tool_call") {
+    const name = firstString(item, ["name", "toolName", "tool_name"]);
+    const server = firstString(item, ["server", "serverName", "server_name"]);
+    return [server, name].filter(Boolean).join(".") || "mcp_tool_call";
+  }
+  if (itemType === "web_search") {
+    return `web_search ${preview(firstString(item, ["query", "q"]) ?? "")}`.trim();
+  }
+  if (itemType === "file_change") {
+    return `file_change ${preview(firstString(item, ["path", "file", "filePath"]) ?? "")}`.trim();
+  }
+  if (itemType === "agent_message") {
+    return `agent_message ${preview(firstString(item, ["text", "message", "content"]) ?? "")}`.trim();
+  }
+  return itemType;
+};
+
+const activityKindForItem = (itemType: string): AgentActivityKind => {
+  if (itemType === "command_execution") {
+    return "command";
+  }
+  if (itemType === "mcp_tool_call" || itemType === "web_search") {
+    return "tool";
+  }
+  if (itemType === "file_change") {
+    return "file";
+  }
+  if (itemType === "agent_message") {
+    return "message";
+  }
+  return "event";
+};
+
+const activityFromCodexEvent = (event: Record<string, unknown>): WorkerActivity | undefined => {
+  const type = typeof event.type === "string" ? event.type : "";
+  const item = event.item && typeof event.item === "object"
+    ? (event.item as Record<string, unknown>)
+    : undefined;
+  if (type.startsWith("item.") && item) {
+    const itemType = typeof item.type === "string" ? item.type : "item";
+    const phase = type.slice("item.".length);
+    return {
+      kind: activityKindForItem(itemType),
+      text: `${phase}: ${itemDetail(item)}`
+    };
+  }
+  if (type === "turn.completed") {
+    const usage = event.usage as Record<string, number> | undefined;
+    if (usage) {
+      const tokens =
+        (usage.input_tokens ?? 0) +
+        (usage.output_tokens ?? 0) +
+        (usage.reasoning_output_tokens ?? 0);
+      return { kind: "token", text: `usage available: ${tokens.toLocaleString()} tokens` };
+    }
+    return { kind: "event", text: "turn.completed" };
+  }
+  if (type === "turn.failed" || type === "error") {
+    const error = errorMessageFromEvent(event);
+    return { kind: "error", text: error ? normalizeCodexError(error) : type };
+  }
+  if (type) {
+    return { kind: "event", text: type };
+  }
+  return undefined;
+};
+
 export class CodexExecAdapter implements WorkerAdapter {
   readonly name = "exec";
 
   async runWorker(
     spec: WorkerSpec,
-    onProgress: (progress: WorkerProgress) => void,
+    onProgress: (progress: WorkerProgress) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<WorkerResult> {
     const started = Date.now();
@@ -208,6 +339,23 @@ export class CodexExecAdapter implements WorkerAdapter {
       let tools = 0;
       let stderr = "";
       let structuredError = "";
+      let progressError: unknown;
+      const pendingProgress = new Set<Promise<void>>();
+      const trackProgress = (progress: WorkerProgress) => {
+        const pending = Promise.resolve(onProgress(progress)).catch((error) => {
+          progressError = error;
+        });
+        pendingProgress.add(pending);
+        pending.finally(() => pendingProgress.delete(pending));
+      };
+      const flushProgress = async () => {
+        while (pendingProgress.size > 0) {
+          await Promise.allSettled(Array.from(pendingProgress));
+        }
+        if (progressError) {
+          throw progressError;
+        }
+      };
 
       signal?.addEventListener(
         "abort",
@@ -226,10 +374,19 @@ export class CodexExecAdapter implements WorkerAdapter {
           }
           try {
             const event = JSON.parse(line) as Record<string, unknown>;
+            const activity = activityFromCodexEvent(event);
+            if (activity) {
+              trackProgress({ message: activity.text, activity });
+            }
             const eventError = errorMessageFromEvent(event);
             if (eventError) {
               structuredError = normalizeCodexError(eventError);
-              onProgress({ message: `error: ${structuredError}` });
+              if (!activity) {
+                trackProgress({
+                  message: `error: ${structuredError}`,
+                  activity: { kind: "error", text: structuredError }
+                });
+              }
             }
             if (event.type === "turn.completed") {
               const usage = event.usage as Record<string, number> | undefined;
@@ -238,7 +395,7 @@ export class CodexExecAdapter implements WorkerAdapter {
                   (usage.output_tokens ?? 0) +
                   (usage.reasoning_output_tokens ?? 0)
                 : tokens;
-              onProgress({ tokens });
+              trackProgress({ tokens });
             }
             if (event.type === "item.completed") {
               const item = event.item as Record<string, unknown> | undefined;
@@ -253,10 +410,14 @@ export class CodexExecAdapter implements WorkerAdapter {
               if (item?.type === "agent_message" && typeof item.text === "string") {
                 finalOutput = item.text;
               }
-              onProgress({ tools, message: String(item?.type ?? "item.completed") });
+              trackProgress({ tools, message: String(item?.type ?? "item.completed") });
             }
           } catch {
             finalOutput += `${line}\n`;
+            const text = preview(line);
+            if (text) {
+              trackProgress({ message: `stdout: ${text}`, activity: { kind: "stdout", text } });
+            }
           }
         }
       });
@@ -265,11 +426,17 @@ export class CodexExecAdapter implements WorkerAdapter {
         stderr += chunk;
         const cleaned = cleanStderr(chunk);
         if (cleaned) {
-          onProgress({ message: `stderr: ${cleaned.slice(0, 500)}` });
+          const text = preview(cleaned, 500);
+          trackProgress({
+            message: `stderr: ${text}`,
+            activity: { kind: "stderr", text }
+          });
         }
       });
       child.on("error", reject);
       child.on("close", (code) => {
+        void (async () => {
+          await flushProgress();
         if (code !== 0) {
           const cleaned = cleanStderr(stderr);
           reject(new Error(structuredError || cleaned || `codex exec exited with code ${code}`));
@@ -282,6 +449,7 @@ export class CodexExecAdapter implements WorkerAdapter {
           elapsedMs: Date.now() - started,
           actualAdapter: this.name
         });
+        })().catch(reject);
       });
     });
   }
@@ -292,7 +460,7 @@ export class CodexSdkAdapter implements WorkerAdapter {
 
   async runWorker(
     spec: WorkerSpec,
-    onProgress: (progress: WorkerProgress) => void,
+    onProgress: (progress: WorkerProgress) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<WorkerResult> {
     try {
@@ -315,12 +483,16 @@ export class CodexSdkAdapter implements WorkerAdapter {
         if (signal?.aborted) {
           throw new Error("Worker aborted");
         }
+        const activity = activityFromCodexEvent(event as unknown as Record<string, unknown>);
+        if (activity) {
+          await onProgress({ message: activity.text, activity });
+        }
         if (event.type === "turn.completed") {
           tokens =
             event.usage.input_tokens +
             event.usage.output_tokens +
             event.usage.reasoning_output_tokens;
-          onProgress({ tokens });
+          await onProgress({ tokens });
         }
         if (event.type === "item.completed") {
           if (
@@ -330,7 +502,7 @@ export class CodexSdkAdapter implements WorkerAdapter {
             event.item.type === "file_change"
           ) {
             tools += 1;
-            onProgress({ tools, message: event.item.type });
+            await onProgress({ tools, message: event.item.type });
           }
           if (event.item.type === "agent_message") {
             output = event.item.text;

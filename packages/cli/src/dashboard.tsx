@@ -68,6 +68,11 @@ const formatActivity = (at?: string) => {
   return `idle ${formatDuration(Math.max(0, Date.now() - new Date(at).getTime()))}`;
 };
 
+const formatActivityLine = (activity: NonNullable<AgentSummary["activity"]>[number]) => {
+  const age = formatDuration(Math.max(0, Date.now() - new Date(activity.at).getTime()));
+  return `${age} ago · ${activity.kind} · ${activity.text}`;
+};
+
 export function DashboardFrame({
   summary,
   width,
@@ -121,6 +126,10 @@ export function DashboardFrame({
     .map((line) => line.replace(/^#{1,6}\s*/, "").replace(/^\s*[-*]\s*/, "").trim())
     .filter(Boolean)
     .slice(detailOffset, detailOffset + detailLineBudget);
+  const activityLineBudget = Math.max(0, detailLineBudget - 1);
+  const activityLines = selectedAgent?.activity
+    ?.slice(-activityLineBudget)
+    .map(formatActivityLine);
 
   return (
     <Box flexDirection="column" width={width}>
@@ -211,6 +220,22 @@ export function DashboardFrame({
                 {truncateMiddle(line, width - 4)}
               </Text>
             ))
+          ) : activityLines && activityLines.length > 0 ? (
+            <>
+              <Text color="gray">
+                {truncateMiddle(
+                  `${selectedAgent.status === "running" ? "Agent is running" : selectedAgent.status}. ${formatActivity(
+                    selectedAgent.lastActivityAt ?? selectedAgent.startedAt
+                  )}. ${formatAgentTokens(selectedAgent)}.`,
+                  width - 4
+                )}
+              </Text>
+              {activityLines.map((line) => (
+                <Text key={line} color="gray">
+                  {truncateMiddle(line, width - 4)}
+                </Text>
+              ))}
+            </>
           ) : (
             <>
               <Text color="gray">

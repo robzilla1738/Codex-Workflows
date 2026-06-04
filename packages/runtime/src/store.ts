@@ -257,7 +257,11 @@ export class RunStore {
             error,
             completedAt: at,
             lastActivityAt: at,
-            lastMessage: "runner orphaned"
+            lastMessage: "runner orphaned",
+            activity: [
+              ...(agent.activity ?? []),
+              { at, kind: "error" as const, text: "runner orphaned" }
+            ].slice(-8)
           }
         : agent
     );
@@ -373,6 +377,7 @@ export class RunStore {
             startedAt: undefined,
             lastActivityAt: undefined,
             lastMessage: undefined,
+            activity: [],
             tokens: 0,
             tools: 0,
             elapsedMs: 0,

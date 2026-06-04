@@ -2,6 +2,7 @@ import path from "node:path";
 import type { WorkerAdapter } from "@codex-workflows/codex-adapter";
 import { createWorkerAdapter } from "@codex-workflows/codex-adapter";
 import {
+  type AgentActivity,
   type AgentDefinition,
   type AgentFinding,
   AgentFindingSchema,
@@ -37,8 +38,28 @@ export interface StartedWorkflowRun {
   done: Promise<RunSummary>;
 }
 
+const maxRecentActivity = 8;
+
 const elapsed = (startedAt?: string) =>
   startedAt ? Math.max(0, Date.now() - new Date(startedAt).getTime()) : 0;
+
+const normalizeActivityText = (text: string) => {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > 500 ? `${compact.slice(0, 499)}…` : compact;
+};
+
+const appendActivity = (agent: AgentSummary, activity: AgentActivity[]) => {
+  const normalized = activity
+    .map((item) => ({
+      ...item,
+      text: normalizeActivityText(item.text)
+    }))
+    .filter((item) => item.text.length > 0);
+  if (normalized.length === 0) {
+    return agent.activity ?? [];
+  }
+  return [...(agent.activity ?? []), ...normalized].slice(-maxRecentActivity);
+};
 
 const buildTotals = (summary: RunSummary) => ({
   totalAgents: summary.agents.length,
@@ -101,7 +122,8 @@ const createInitialSummary = (
       tokens: 0,
       tools: 0,
       elapsedMs: 0,
-      attempts: 0
+      attempts: 0,
+      activity: []
     }))
   );
   const createdAt = nowIso();
@@ -572,7 +594,8 @@ export class WorkflowRunner {
               status: "running",
               startedAt,
               lastActivityAt: startedAt,
-              lastMessage: "started"
+              lastMessage: "started",
+              activity: [{ at: startedAt, kind: "event", text: "started" }]
             }
           : agent
       );
@@ -618,8 +641,30 @@ export class WorkflowRunner {
           },
           async (progress) => {
             const at = nowIso();
+            const progressActivity = (
+              Array.isArray(progress.activity)
+                ? progress.activity
+                : progress.activity
+                  ? [progress.activity]
+                  : []
+            ).map((item) => ({
+              at,
+              kind: item.kind,
+              text: item.text
+            }));
+            if (progressActivity.length === 0 && progress.message) {
+              progressActivity.push({ at, kind: "message", text: progress.message });
+            }
+            const activityMessage = progressActivity.at(-1)?.text;
             if (progress.actualAdapter && progress.actualAdapter !== selectedAdapter) {
               selectedAdapter = progress.actualAdapter;
+              progressActivity.push({
+                at,
+                kind: "adapter",
+                text: progress.fallbackReason
+                  ? `adapter selected: ${progress.actualAdapter} (${progress.fallbackReason})`
+                  : `adapter selected: ${progress.actualAdapter}`
+              });
               await this.store.appendEvent({
                 type: "adapter_selected",
                 runId: summary.id,
@@ -652,12 +697,14 @@ export class WorkflowRunner {
                       lastActivityAt: at,
                       lastMessage:
                         progress.message ??
+                        activityMessage ??
                         (progress.tokens !== undefined
                           ? "token usage updated"
                           : progress.tools !== undefined
                             ? "tool usage updated"
                             : agent.lastMessage),
-                      attempts: attempt
+                      attempts: attempt,
+                      activity: appendActivity(agent, progressActivity)
                     }
                   : agent
               );
@@ -669,16 +716,17 @@ export class WorkflowRunner {
               at,
               tokens: progress.tokens,
               tools: progress.tools,
-              message: progress.message
+              message: progress.message,
+              activity: progressActivity.length > 0 ? progressActivity : undefined
             });
-            if (progress.message) {
+            for (const activity of progressActivity) {
               await this.store.appendEvent({
                 type: "agent_tool_event",
                 runId: current.id,
                 agentId,
-                at,
-                kind: "message",
-                text: progress.message
+                at: activity.at,
+                kind: activity.kind,
+                text: activity.text
               });
             }
           },
@@ -746,7 +794,8 @@ export class WorkflowRunner {
             findings,
             completedAt,
             lastActivityAt: completedAt,
-            lastMessage: "completed"
+            lastMessage: "completed",
+            activity: appendActivity(agent, [{ at: completedAt, kind: "event", text: "completed" }])
           };
           return completedAgent;
         });
@@ -790,7 +839,14 @@ export class WorkflowRunner {
                 rawResult: lastRawOutput || agent.rawResult,
                 completedAt,
                 lastActivityAt: completedAt,
-                lastMessage: cancelledByStopAgent ? "cancelled" : message
+                lastMessage: cancelledByStopAgent ? "cancelled" : message,
+                activity: appendActivity(agent, [
+                  {
+                    at: completedAt,
+                    kind: cancelledByStopAgent ? "event" : "error",
+                    text: cancelledByStopAgent ? "cancelled" : message
+                  }
+                ])
               }
             : agent
         );

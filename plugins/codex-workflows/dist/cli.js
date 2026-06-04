@@ -57920,6 +57920,23 @@ var AgentFindingSchema = external_exports.object({
   phaseId: external_exports.string(),
   details: external_exports.string().optional()
 });
+var AgentActivityKindSchema = external_exports.enum([
+  "adapter",
+  "command",
+  "error",
+  "event",
+  "file",
+  "message",
+  "stderr",
+  "stdout",
+  "token",
+  "tool"
+]);
+var AgentActivitySchema = external_exports.object({
+  at: external_exports.string(),
+  kind: AgentActivityKindSchema,
+  text: external_exports.string().min(1)
+});
 var AgentDefinitionSchema = external_exports.object({
   id: external_exports.string().min(1),
   title: external_exports.string().min(1),
@@ -57976,7 +57993,8 @@ var AgentSummarySchema = external_exports.object({
   startedAt: external_exports.string().optional(),
   completedAt: external_exports.string().optional(),
   lastActivityAt: external_exports.string().optional(),
-  lastMessage: external_exports.string().optional()
+  lastMessage: external_exports.string().optional(),
+  activity: external_exports.array(AgentActivitySchema).optional()
 });
 var RunTotalsSchema = external_exports.object({
   totalAgents: external_exports.number().int().nonnegative(),
@@ -58061,7 +58079,8 @@ var WorkflowEventSchema = external_exports.discriminatedUnion("type", [
     at: external_exports.string(),
     tokens: external_exports.number().nonnegative().optional(),
     tools: external_exports.number().int().nonnegative().optional(),
-    message: external_exports.string().optional()
+    message: external_exports.string().optional(),
+    activity: external_exports.array(AgentActivitySchema).optional()
   }),
   external_exports.object({
     type: external_exports.literal("agent_completed"),
@@ -58086,7 +58105,7 @@ var WorkflowEventSchema = external_exports.discriminatedUnion("type", [
     runId: external_exports.string(),
     agentId: external_exports.string(),
     at: external_exports.string(),
-    kind: external_exports.enum(["tool", "stdout", "stderr", "file", "message"]),
+    kind: AgentActivityKindSchema,
     text: external_exports.string()
   }),
   external_exports.object({
@@ -58394,10 +58413,14 @@ var SimulatedCodexAdapter = class {
     const steps = 4;
     for (let step = 1; step <= steps; step += 1) {
       await sleep(durationMs / steps, signal);
-      onProgress({
+      await onProgress({
         tokens: Math.round(targetTokens * step / steps),
         tools: Math.round(targetTools * step / steps),
-        message: `${spec.title}: step ${step}/${steps}`
+        message: `${spec.title}: step ${step}/${steps}`,
+        activity: {
+          kind: "event",
+          text: `${spec.title}: simulated step ${step}/${steps}`
+        }
       });
     }
     return {
@@ -58459,6 +58482,104 @@ var normalizeCodexError = (raw) => {
   }
   return message;
 };
+var preview = (value, max = 280) => {
+  if (value === void 0 || value === null) {
+    return "";
+  }
+  const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value);
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > max ? `${compact.slice(0, max - 1)}\u2026` : compact;
+};
+var firstString = (record2, keys) => {
+  for (const key of keys) {
+    const value = record2[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return void 0;
+};
+var commandText = (item) => {
+  const direct = firstString(item, ["command", "cmd", "shellCommand", "input"]);
+  if (direct) {
+    return direct;
+  }
+  const command = item.command;
+  if (typeof command === "string") {
+    return command;
+  }
+  if (command && typeof command === "object") {
+    return firstString(command, ["command", "cmd", "program", "shell"]);
+  }
+  return void 0;
+};
+var itemDetail = (item) => {
+  const itemType = typeof item.type === "string" ? item.type : "item";
+  if (itemType === "command_execution") {
+    const command = commandText(item);
+    const status = firstString(item, ["status", "state"]);
+    const exitCode = typeof item.exit_code === "number" ? `exit ${item.exit_code}` : typeof item.exitCode === "number" ? `exit ${item.exitCode}` : void 0;
+    return [command ? `command ${preview(command)}` : "command_execution", status, exitCode].filter(Boolean).join(" \xB7 ");
+  }
+  if (itemType === "mcp_tool_call") {
+    const name = firstString(item, ["name", "toolName", "tool_name"]);
+    const server = firstString(item, ["server", "serverName", "server_name"]);
+    return [server, name].filter(Boolean).join(".") || "mcp_tool_call";
+  }
+  if (itemType === "web_search") {
+    return `web_search ${preview(firstString(item, ["query", "q"]) ?? "")}`.trim();
+  }
+  if (itemType === "file_change") {
+    return `file_change ${preview(firstString(item, ["path", "file", "filePath"]) ?? "")}`.trim();
+  }
+  if (itemType === "agent_message") {
+    return `agent_message ${preview(firstString(item, ["text", "message", "content"]) ?? "")}`.trim();
+  }
+  return itemType;
+};
+var activityKindForItem = (itemType) => {
+  if (itemType === "command_execution") {
+    return "command";
+  }
+  if (itemType === "mcp_tool_call" || itemType === "web_search") {
+    return "tool";
+  }
+  if (itemType === "file_change") {
+    return "file";
+  }
+  if (itemType === "agent_message") {
+    return "message";
+  }
+  return "event";
+};
+var activityFromCodexEvent = (event) => {
+  const type = typeof event.type === "string" ? event.type : "";
+  const item = event.item && typeof event.item === "object" ? event.item : void 0;
+  if (type.startsWith("item.") && item) {
+    const itemType = typeof item.type === "string" ? item.type : "item";
+    const phase = type.slice("item.".length);
+    return {
+      kind: activityKindForItem(itemType),
+      text: `${phase}: ${itemDetail(item)}`
+    };
+  }
+  if (type === "turn.completed") {
+    const usage = event.usage;
+    if (usage) {
+      const tokens = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.reasoning_output_tokens ?? 0);
+      return { kind: "token", text: `usage available: ${tokens.toLocaleString()} tokens` };
+    }
+    return { kind: "event", text: "turn.completed" };
+  }
+  if (type === "turn.failed" || type === "error") {
+    const error51 = errorMessageFromEvent(event);
+    return { kind: "error", text: error51 ? normalizeCodexError(error51) : type };
+  }
+  if (type) {
+    return { kind: "event", text: type };
+  }
+  return void 0;
+};
 var CodexExecAdapter = class {
   name = "exec";
   async runWorker(spec, onProgress, signal) {
@@ -58492,6 +58613,23 @@ var CodexExecAdapter = class {
       let tools = 0;
       let stderr = "";
       let structuredError = "";
+      let progressError;
+      const pendingProgress = /* @__PURE__ */ new Set();
+      const trackProgress = (progress) => {
+        const pending = Promise.resolve(onProgress(progress)).catch((error51) => {
+          progressError = error51;
+        });
+        pendingProgress.add(pending);
+        pending.finally(() => pendingProgress.delete(pending));
+      };
+      const flushProgress = async () => {
+        while (pendingProgress.size > 0) {
+          await Promise.allSettled(Array.from(pendingProgress));
+        }
+        if (progressError) {
+          throw progressError;
+        }
+      };
       signal?.addEventListener("abort", () => {
         child.kill("SIGTERM");
         reject(new Error("Worker aborted"));
@@ -58504,15 +58642,24 @@ var CodexExecAdapter = class {
           }
           try {
             const event = JSON.parse(line);
+            const activity = activityFromCodexEvent(event);
+            if (activity) {
+              trackProgress({ message: activity.text, activity });
+            }
             const eventError = errorMessageFromEvent(event);
             if (eventError) {
               structuredError = normalizeCodexError(eventError);
-              onProgress({ message: `error: ${structuredError}` });
+              if (!activity) {
+                trackProgress({
+                  message: `error: ${structuredError}`,
+                  activity: { kind: "error", text: structuredError }
+                });
+              }
             }
             if (event.type === "turn.completed") {
               const usage = event.usage;
               tokens = usage ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.reasoning_output_tokens ?? 0) : tokens;
-              onProgress({ tokens });
+              trackProgress({ tokens });
             }
             if (event.type === "item.completed") {
               const item = event.item;
@@ -58522,11 +58669,15 @@ var CodexExecAdapter = class {
               if (item?.type === "agent_message" && typeof item.text === "string") {
                 finalOutput = item.text;
               }
-              onProgress({ tools, message: String(item?.type ?? "item.completed") });
+              trackProgress({ tools, message: String(item?.type ?? "item.completed") });
             }
           } catch {
             finalOutput += `${line}
 `;
+            const text = preview(line);
+            if (text) {
+              trackProgress({ message: `stdout: ${text}`, activity: { kind: "stdout", text } });
+            }
           }
         }
       });
@@ -58535,23 +58686,30 @@ var CodexExecAdapter = class {
         stderr += chunk;
         const cleaned = cleanStderr(chunk);
         if (cleaned) {
-          onProgress({ message: `stderr: ${cleaned.slice(0, 500)}` });
+          const text = preview(cleaned, 500);
+          trackProgress({
+            message: `stderr: ${text}`,
+            activity: { kind: "stderr", text }
+          });
         }
       });
       child.on("error", reject);
       child.on("close", (code) => {
-        if (code !== 0) {
-          const cleaned = cleanStderr(stderr);
-          reject(new Error(structuredError || cleaned || `codex exec exited with code ${code}`));
-          return;
-        }
-        resolve({
-          output: finalOutput.trim() || "Codex worker completed.",
-          tokens,
-          tools,
-          elapsedMs: Date.now() - started,
-          actualAdapter: this.name
-        });
+        void (async () => {
+          await flushProgress();
+          if (code !== 0) {
+            const cleaned = cleanStderr(stderr);
+            reject(new Error(structuredError || cleaned || `codex exec exited with code ${code}`));
+            return;
+          }
+          resolve({
+            output: finalOutput.trim() || "Codex worker completed.",
+            tokens,
+            tools,
+            elapsedMs: Date.now() - started,
+            actualAdapter: this.name
+          });
+        })().catch(reject);
       });
     });
   }
@@ -58579,14 +58737,18 @@ var CodexSdkAdapter = class {
         if (signal?.aborted) {
           throw new Error("Worker aborted");
         }
+        const activity = activityFromCodexEvent(event);
+        if (activity) {
+          await onProgress({ message: activity.text, activity });
+        }
         if (event.type === "turn.completed") {
           tokens = event.usage.input_tokens + event.usage.output_tokens + event.usage.reasoning_output_tokens;
-          onProgress({ tokens });
+          await onProgress({ tokens });
         }
         if (event.type === "item.completed") {
           if (event.item.type === "command_execution" || event.item.type === "mcp_tool_call" || event.item.type === "web_search" || event.item.type === "file_change") {
             tools += 1;
-            onProgress({ tools, message: event.item.type });
+            await onProgress({ tools, message: event.item.type });
           }
           if (event.item.type === "agent_message") {
             output = event.item.text;
@@ -58824,7 +58986,11 @@ var RunStore = class {
       error: error51,
       completedAt: at,
       lastActivityAt: at,
-      lastMessage: "runner orphaned"
+      lastMessage: "runner orphaned",
+      activity: [
+        ...agent.activity ?? [],
+        { at, kind: "error", text: "runner orphaned" }
+      ].slice(-8)
     } : agent);
     next.phases = next.phases.map((phase) => phase.status === "running" || phase.status === "paused" ? {
       ...phase,
@@ -58923,6 +59089,7 @@ var RunStore = class {
       startedAt: void 0,
       lastActivityAt: void 0,
       lastMessage: void 0,
+      activity: [],
       tokens: 0,
       tools: 0,
       elapsedMs: 0,
@@ -58974,7 +59141,22 @@ var RunStore = class {
 };
 
 // packages/runtime/dist/runner.js
+var maxRecentActivity = 8;
 var elapsed2 = (startedAt) => startedAt ? Math.max(0, Date.now() - new Date(startedAt).getTime()) : 0;
+var normalizeActivityText = (text) => {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > 500 ? `${compact.slice(0, 499)}\u2026` : compact;
+};
+var appendActivity = (agent, activity) => {
+  const normalized = activity.map((item) => ({
+    ...item,
+    text: normalizeActivityText(item.text)
+  })).filter((item) => item.text.length > 0);
+  if (normalized.length === 0) {
+    return agent.activity ?? [];
+  }
+  return [...agent.activity ?? [], ...normalized].slice(-maxRecentActivity);
+};
 var buildTotals = (summary) => ({
   totalAgents: summary.agents.length,
   completedAgents: summary.agents.filter((agent) => agent.status === "completed").length,
@@ -59020,7 +59202,8 @@ var createInitialSummary = (runId, definition, workflowPath, cwd2, options) => {
     tokens: 0,
     tools: 0,
     elapsedMs: 0,
-    attempts: 0
+    attempts: 0,
+    activity: []
   })));
   const createdAt = nowIso();
   return {
@@ -59359,7 +59542,8 @@ var WorkflowRunner = class {
         status: "running",
         startedAt,
         lastActivityAt: startedAt,
-        lastMessage: "started"
+        lastMessage: "started",
+        activity: [{ at: startedAt, kind: "event", text: "started" }]
       } : agent);
     });
     await this.store.writeAgentPrompt(next.id, agentId, workerSpec.prompt);
@@ -59400,8 +59584,22 @@ Previous output was invalid: ${validationError}
 Return valid JSON text only.`
         }, async (progress) => {
           const at = nowIso();
+          const progressActivity = (Array.isArray(progress.activity) ? progress.activity : progress.activity ? [progress.activity] : []).map((item) => ({
+            at,
+            kind: item.kind,
+            text: item.text
+          }));
+          if (progressActivity.length === 0 && progress.message) {
+            progressActivity.push({ at, kind: "message", text: progress.message });
+          }
+          const activityMessage = progressActivity.at(-1)?.text;
           if (progress.actualAdapter && progress.actualAdapter !== selectedAdapter) {
             selectedAdapter = progress.actualAdapter;
+            progressActivity.push({
+              at,
+              kind: "adapter",
+              text: progress.fallbackReason ? `adapter selected: ${progress.actualAdapter} (${progress.fallbackReason})` : `adapter selected: ${progress.actualAdapter}`
+            });
             await this.store.appendEvent({
               type: "adapter_selected",
               runId: summary.id,
@@ -59424,8 +59622,9 @@ Return valid JSON text only.`
               tools: progress.tools ?? agent.tools,
               actualAdapter: progress.actualAdapter ?? agent.actualAdapter,
               lastActivityAt: at,
-              lastMessage: progress.message ?? (progress.tokens !== void 0 ? "token usage updated" : progress.tools !== void 0 ? "tool usage updated" : agent.lastMessage),
-              attempts: attempt
+              lastMessage: progress.message ?? activityMessage ?? (progress.tokens !== void 0 ? "token usage updated" : progress.tools !== void 0 ? "tool usage updated" : agent.lastMessage),
+              attempts: attempt,
+              activity: appendActivity(agent, progressActivity)
             } : agent);
           });
           await this.store.appendEvent({
@@ -59435,16 +59634,17 @@ Return valid JSON text only.`
             at,
             tokens: progress.tokens,
             tools: progress.tools,
-            message: progress.message
+            message: progress.message,
+            activity: progressActivity.length > 0 ? progressActivity : void 0
           });
-          if (progress.message) {
+          for (const activity of progressActivity) {
             await this.store.appendEvent({
               type: "agent_tool_event",
               runId: current.id,
               agentId,
-              at,
-              kind: "message",
-              text: progress.message
+              at: activity.at,
+              kind: activity.kind,
+              text: activity.text
             });
           }
         }, abortController.signal);
@@ -59504,7 +59704,8 @@ Return valid JSON text only.`
             findings,
             completedAt,
             lastActivityAt: completedAt,
-            lastMessage: "completed"
+            lastMessage: "completed",
+            activity: appendActivity(agent, [{ at: completedAt, kind: "event", text: "completed" }])
           };
           return completedAgent;
         });
@@ -59546,7 +59747,14 @@ Return valid JSON text only.`
           rawResult: lastRawOutput || agent.rawResult,
           completedAt,
           lastActivityAt: completedAt,
-          lastMessage: cancelledByStopAgent ? "cancelled" : message
+          lastMessage: cancelledByStopAgent ? "cancelled" : message,
+          activity: appendActivity(agent, [
+            {
+              at: completedAt,
+              kind: cancelledByStopAgent ? "event" : "error",
+              text: cancelledByStopAgent ? "cancelled" : message
+            }
+          ])
         } : agent);
       });
       await this.store.appendEvent(cancelledByStopAgent ? {
@@ -59790,6 +59998,10 @@ var formatActivity = (at) => {
   }
   return `idle ${formatDuration(Math.max(0, Date.now() - new Date(at).getTime()))}`;
 };
+var formatActivityLine = (activity) => {
+  const age = formatDuration(Math.max(0, Date.now() - new Date(activity.at).getTime()));
+  return `${age} ago \xB7 ${activity.kind} \xB7 ${activity.text}`;
+};
 function DashboardFrame({
   summary,
   width,
@@ -59825,6 +60037,8 @@ function DashboardFrame({
   const nameWidth = Math.max(18, width - sidebarWidth - modelWidth - metricsWidth - 14);
   const completed = summary.totals.completedAgents + summary.totals.failedAgents;
   const detailLines = selectedAgent?.result?.split("\n").map((line) => line.replace(/^#{1,6}\s*/, "").replace(/^\s*[-*]\s*/, "").trim()).filter(Boolean).slice(detailOffset, detailOffset + detailLineBudget);
+  const activityLineBudget = Math.max(0, detailLineBudget - 1);
+  const activityLines = selectedAgent?.activity?.slice(-activityLineBudget).map(formatActivityLine);
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Box_default, { flexDirection: "column", width, children: [
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Box_default, { justifyContent: "space-between", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "blueBright", bold: true, children: summary.name }),
@@ -59929,7 +60143,15 @@ function DashboardFrame({
           selectedAgent.reasoningEffort ? `:${selectedAgent.reasoningEffort}` : ""
         ] })
       ] }),
-      detailLines && detailLines.length > 0 ? detailLines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(line, width - 4) }, line)) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+      detailLines && detailLines.length > 0 ? detailLines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(line, width - 4) }, line)) : activityLines && activityLines.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(
+          `${selectedAgent.status === "running" ? "Agent is running" : selectedAgent.status}. ${formatActivity(
+            selectedAgent.lastActivityAt ?? selectedAgent.startedAt
+          )}. ${formatAgentTokens(selectedAgent)}.`,
+          width - 4
+        ) }),
+        activityLines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: truncateMiddle(line, width - 4) }, line))
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Text, { color: "gray", children: selectedAgent.status === "running" ? truncateMiddle(
           `Agent is running. ${formatActivity(
             selectedAgent.lastActivityAt ?? selectedAgent.startedAt

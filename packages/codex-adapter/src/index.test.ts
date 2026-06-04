@@ -33,7 +33,9 @@ describe("SimulatedCodexAdapter", () => {
         expectedTools: 3,
         durationMs: 1
       },
-      (event) => progress.push(event)
+      (event) => {
+        progress.push(event);
+      }
     );
 
     expect(progress.length).toBeGreaterThan(0);
@@ -84,7 +86,9 @@ describe("SimulatedCodexAdapter", () => {
       fakeCodex,
       [
         "#!/bin/sh",
-        "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\"}}'",
+        "echo 'worker warning' >&2",
+        "echo '{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"rg --files\"}}'",
+        "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"rg --files\",\"exit_code\":0}}'",
         "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\\\"findings\\\\\":[]}\"}}'",
         "echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"reasoning_output_tokens\":6}}'",
         "exit 0",
@@ -104,7 +108,9 @@ describe("SimulatedCodexAdapter", () => {
         cwd: root,
         sandbox: "read-only"
       },
-      (event) => progress.push(event)
+      (event) => {
+        progress.push(event);
+      }
     );
 
     expect(result.output).toBe('{"findings":[]}');
@@ -112,6 +118,21 @@ describe("SimulatedCodexAdapter", () => {
     expect(result.tools).toBe(1);
     expect(progress).toContainEqual(expect.objectContaining({ tokens: 20 }));
     expect(progress).toContainEqual(expect.objectContaining({ tools: 1 }));
+    expect(progress).toContainEqual(
+      expect.objectContaining({
+        activity: expect.objectContaining({ kind: "command", text: expect.stringContaining("rg --files") })
+      })
+    );
+    expect(progress).toContainEqual(
+      expect.objectContaining({
+        activity: expect.objectContaining({ kind: "message", text: expect.stringContaining("agent_message") })
+      })
+    );
+    expect(progress).toContainEqual(
+      expect.objectContaining({
+        activity: expect.objectContaining({ kind: "stderr", text: "worker warning" })
+      })
+    );
   });
 
   it("falls back from unavailable SDK launch to exec in auto mode", async () => {

@@ -43,7 +43,9 @@ repeatable multi-agent process.
    or reinstall/enable the plugin before running workflows. Use the repo-local
    `pnpm cwf` CLI only when working inside the `codex-workflows` source repo.
 11. Keep the main Codex thread concise. Poll status and summarize progress
-   instead of pasting raw worker logs.
+   instead of pasting raw worker logs. The dashboard shows recent worker
+   activity live, but exact token totals may remain pending until Codex emits
+   usage metadata.
 12. For bug finding, default to the bounded
     `workflows/bug-sweep.workflow.js`.
     Use `workflows/bug-sweep-deep.workflow.js` only when the user explicitly

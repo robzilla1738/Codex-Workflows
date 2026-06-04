@@ -51,7 +51,19 @@ const fixture: RunSummary = {
       attempts: 1,
       startedAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
       lastActivityAt: new Date(Date.now() - 15 * 1000).toISOString(),
-      lastMessage: "command_execution"
+      lastMessage: "completed: command rg",
+      activity: [
+        {
+          at: new Date(Date.now() - 45 * 1000).toISOString(),
+          kind: "command",
+          text: "started: command rg --files"
+        },
+        {
+          at: new Date(Date.now() - 15 * 1000).toISOString(),
+          kind: "message",
+          text: "completed: agent_message {\"findings\":[]}"
+        }
+      ]
     }
   ],
   totals: {
@@ -85,6 +97,7 @@ describe("DashboardFrame", () => {
     );
     expect(lastFrame()).toContain("tok pending");
     expect(lastFrame()).toContain("idle");
-    expect(lastFrame()).toContain("command_execution");
+    expect(lastFrame()).toContain("started: command");
+    expect(lastFrame()).toContain("agent_message");
   });
 });
