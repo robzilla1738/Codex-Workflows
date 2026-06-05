@@ -13,8 +13,7 @@ The bundle includes:
 - `skills/codex-workflows/SKILL.md`
 - `workflows/*.workflow.js`
 
-Users should be able to install from GitHub without cloning the repo or running
-`pnpm`.
+Users can install from GitHub without cloning the repo or running `pnpm`.
 
 ## Public install
 
@@ -90,8 +89,9 @@ reload plugin skills and MCP tools.
 
 ## OpenAI-curated plugin status
 
-This project is packaged like a production Codex plugin, but the OpenAI-curated
-plugin directory is not self-serve in the public Codex docs. If OpenAI accepts
-it later, this repo should already have the pieces they need: a marketplace,
-plugin manifest, bundled MCP server, skill, CI, license, and a repeatable
-validation command.
+This is a GitHub-installable Codex marketplace plugin. It is not listed in an
+OpenAI-curated plugin directory.
+
+The repo still keeps the pieces a curated listing would need later: a
+marketplace file, plugin manifest, bundled MCP server, skill, CI, license, and
+a repeatable validation command.

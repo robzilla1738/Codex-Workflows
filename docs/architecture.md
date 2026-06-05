@@ -3,7 +3,7 @@
 Codex Workflows has two jobs:
 
 1. Let Codex start and inspect durable workflow runs through MCP.
-2. Give users a terminal dashboard that feels close to Claude Code workflows.
+2. Give users a terminal dashboard for phase, agent, event, and control state.
 
 The code is split so those two jobs do not get tangled.
 

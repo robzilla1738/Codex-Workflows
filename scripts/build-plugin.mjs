@@ -93,7 +93,7 @@ await writeFile(
       mcpServers: "./.mcp.json",
       interface: {
         displayName: "Codex Workflows",
-        shortDescription: "Run Claude-style dynamic workflows in Codex.",
+        shortDescription: "Run workflow-as-code jobs in Codex.",
         longDescription:
           "Codex Workflows runs JavaScript workflow definitions, starts Codex workers, exposes MCP tools, and opens a live terminal dashboard for multi-agent review work.",
         developerName: "Robert Courson",
@@ -152,6 +152,7 @@ await writeFile(
     "# Codex Workflows Plugin",
     "",
     "This directory is the distributable Codex plugin bundle generated from the monorepo root.",
+    "Do not edit the bundled `dist/` files by hand. Change the source packages and run `pnpm validate:plugin` from the repo root.",
     "",
     "Install from the repository marketplace:",
     "",
@@ -160,7 +161,7 @@ await writeFile(
     "codex plugin add codex-workflows@codex-workflows",
     "```",
     "",
-    "The plugin includes bundled MCP and CLI entrypoints under `dist/`, the `codex-workflows` skill, and built-in workflow templates.",
+    "The plugin includes bundled MCP and CLI entrypoints under `dist/`, the `codex-workflows` skill, and the built-in review workflow templates.",
     ""
   ].join("\n")
 );

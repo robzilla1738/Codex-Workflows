@@ -11,7 +11,7 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Workflows",
-    "shortDescription": "Run Claude-style dynamic workflows in Codex.",
+    "shortDescription": "Run workflow-as-code jobs in Codex.",
     "longDescription": "Codex Workflows runs JavaScript workflow definitions, starts Codex workers, exposes MCP tools, and opens a live terminal dashboard for multi-agent review work.",
     "developerName": "Robert Courson",
     "category": "Productivity",

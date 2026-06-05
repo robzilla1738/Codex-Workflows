@@ -1,13 +1,13 @@
 ---
 name: codex-workflows
-description: Run Claude-style dynamic workflows in Codex for large fanout, ultracode-style review, release diff review, deep research, adversarial verification, or multi-agent orchestration.
+description: Run workflow-as-code jobs in Codex for large fanout, release diff review, security review, bug sweeps, adversarial verification, or multi-agent orchestration.
 ---
 
 # Codex Workflows
 
-Use this skill when the user asks to run a workflow, use ultracode-style effort,
-fan out many agents, perform release diff review, run deep research, or save a
-repeatable multi-agent process.
+Use this skill when the user asks to run a workflow, fan out many agents,
+perform release diff review, run a security or bug sweep, or save a repeatable
+multi-agent process.
 
 ## Workflow
 

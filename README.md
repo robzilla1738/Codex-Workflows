@@ -4,12 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Buy me a coffee](https://img.shields.io/badge/support-Buy%20me%20a%20coffee-ffdd00?logo=buymeacoffee&logoColor=000)](https://www.buymeacoffee.com/robcourson)
 
-Claude Code has workflows. Codex has subagents, skills, plugins, and MCP.
-
-`codex-workflows` connects those pieces into a workflow-as-code runtime for
-Codex: durable multi-agent runs, a live terminal dashboard, restartable agents,
-saved workflow scripts, and bug-finding templates that are meant to be used on
-real repos.
+Codex has subagents, skills, plugins, and MCP. `codex-workflows` connects those
+pieces into a workflow-as-code runtime: durable multi-agent runs, a live
+terminal dashboard, restartable agents, saved workflow scripts, and review
+templates that are meant to be used on real repos.
 
 This is not a native Codex `/workflows` command. Codex does not expose that
 plugin API today. This project ships the closest available surface: a Codex
@@ -17,7 +15,7 @@ plugin with an MCP server and a `cwf` terminal UI.
 
 ## Install
 
-Once this repo is public, install it as a Codex marketplace:
+Install it from the GitHub marketplace in this repo:
 
 ```bash
 codex plugin marketplace add robzilla1738/Codex-Workflows
@@ -143,5 +141,5 @@ The plugin bundle is committed so users can install from GitHub without running
 
 ## Support
 
-If this saves you time, you can support the work here:
+If this saves you time, you can support the project here:
 [buymeacoffee.com/robcourson](https://www.buymeacoffee.com/robcourson).
